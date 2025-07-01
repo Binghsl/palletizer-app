@@ -18,6 +18,7 @@ st.sidebar.header(":brick: Pallet Settings")
 pallet_length = st.sidebar.number_input("Pallet Length (cm)", min_value=50.0, value=120.0)
 pallet_width = st.sidebar.number_input("Pallet Width (cm)", min_value=50.0, value=100.0)
 max_pallet_height = st.sidebar.number_input("Max Pallet Height (cm)", min_value=50.0, value=150.0)
+pallet_base_height = st.sidebar.number_input("Pallet Base Height (cm)", min_value=5.0, value=20.0)
 lock_orientation = st.sidebar.checkbox("Lock Orientation (Fix Box Height)", value=False)
 
 # Box input count
@@ -113,11 +114,11 @@ def make_cuboid(x, y, z, l, w, h, color, name):
     return go.Mesh3d(x=vertices[:, 0], y=vertices[:, 1], z=vertices[:, 2],
                      i=I, j=J, k=K, opacity=0.5, color=color, name=name)
 
-def plot_pallet_3d(pallet, pallet_L, pallet_W, pallet_H):
+def plot_pallet_3d(pallet, pallet_L, pallet_W, pallet_H, pallet_base_H):
     fig = go.Figure()
     colors = ['red', 'blue', 'green', 'orange', 'purple', 'cyan', 'magenta', 'yellow', 'brown', 'pink']
-    z_offset = 2  # pallet base height
-    fig.add_trace(make_cuboid(0, 0, 0, pallet_L, pallet_W, 2, 'saddlebrown', 'Pallet Base'))
+    z_offset = pallet_base_H  # pallet base height
+    fig.add_trace(make_cuboid(0, 0, 0, pallet_L, pallet_W, pallet_base_H, 'saddlebrown', 'Pallet Base'))
 
     for i, box in enumerate(pallet["boxes"]):
         l, w, h = box["Orientation"]
@@ -150,7 +151,7 @@ def plot_pallet_3d(pallet, pallet_L, pallet_W, pallet_H):
     )
     return fig
 
-def get_used_pallet_dimensions(pallet, pallet_L, pallet_W, pallet_base_height=2):
+def get_used_pallet_dimensions(pallet, pallet_L, pallet_W, pallet_base_height):
     max_x = 0
     max_y = 0
     max_z = 0
@@ -173,7 +174,7 @@ def get_used_pallet_dimensions(pallet, pallet_L, pallet_W, pallet_base_height=2)
                     max_z = max(max_z, z_pos + h)
                     count += 1
 
-    return max_x, max_y, max_z
+    return max_x, max_y, max_z - pallet_base_height  # return cargo height only
 
 if st.button(":mag: Calculate Palletization"):
     if box_df.empty:
@@ -189,10 +190,15 @@ if st.button(":mag: Calculate Palletization"):
         for i, pallet in enumerate(pallets):
             st.markdown(f"### 📦 Pallet #{i+1} (Stack Height: {pallet['height']:.1f} cm)")
             st.dataframe(pd.DataFrame(pallet["boxes"]))
-            st.plotly_chart(plot_pallet_3d(pallet, pallet_length, pallet_width, max_pallet_height), use_container_width=True)
+            st.plotly_chart(plot_pallet_3d(pallet, pallet_length, pallet_width, max_pallet_height, pallet_base_height), use_container_width=True)
 
-            used_L, used_W, used_H = get_used_pallet_dimensions(pallet, pallet_length, pallet_width)
-            st.write(f"**Used Pallet Dimensions:** Length: {used_L:.1f} cm, Width: {used_W:.1f} cm, Height: {used_H:.1f} cm")
+            used_L, used_W, cargo_H = get_used_pallet_dimensions(pallet, pallet_length, pallet_width, pallet_base_height)
+            total_H = pallet_base_height + cargo_H
+            total_L = max(pallet_length, used_L)
+            total_W = max(pallet_width, used_W)
+
+            st.write(f"**Total Pallet Dimensions including base:**")
+            st.write(f"Length: {total_L:.1f} cm, Width: {total_W:.1f} cm, Height: {total_H:.1f} cm")
 
         if remaining["Quantity"].sum() > 0:
             st.warning(f"Boxes not placed: {remaining['Quantity'].sum()}")
