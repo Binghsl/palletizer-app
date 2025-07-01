@@ -116,7 +116,7 @@ def make_cuboid(x, y, z, l, w, h, color, name):
 def plot_pallet_3d(pallet, pallet_L, pallet_W, pallet_H):
     fig = go.Figure()
     colors = ['red', 'blue', 'green', 'orange', 'purple', 'cyan', 'magenta', 'yellow', 'brown', 'pink']
-    z_offset = 2  # pallet base
+    z_offset = 2  # pallet base height
     fig.add_trace(make_cuboid(0, 0, 0, pallet_L, pallet_W, 2, 'saddlebrown', 'Pallet Base'))
 
     for i, box in enumerate(pallet["boxes"]):
@@ -150,6 +150,31 @@ def plot_pallet_3d(pallet, pallet_L, pallet_W, pallet_H):
     )
     return fig
 
+def get_used_pallet_dimensions(pallet, pallet_L, pallet_W, pallet_base_height=2):
+    max_x = 0
+    max_y = 0
+    max_z = 0
+    for box in pallet["boxes"]:
+        l, w, h = box["Orientation"]
+        fit_L, fit_W, fit_H = box["fit_L"], box["fit_W"], box["fit_H"]
+        placed = box["Placed"]
+
+        count = 0
+        for z in range(fit_H):
+            for y in range(fit_W):
+                for x in range(fit_L):
+                    if count >= placed:
+                        break
+                    x_pos = (pallet_L - fit_L * l) / 2 + x * l
+                    y_pos = (pallet_W - fit_W * w) / 2 + y * w
+                    z_pos = z * h + pallet_base_height
+                    max_x = max(max_x, x_pos + l)
+                    max_y = max(max_y, y_pos + w)
+                    max_z = max(max_z, z_pos + h)
+                    count += 1
+
+    return max_x, max_y, max_z
+
 if st.button(":mag: Calculate Palletization"):
     if box_df.empty:
         st.error("Please enter box data")
@@ -159,12 +184,15 @@ if st.button(":mag: Calculate Palletization"):
         st.success(f"Total pallets needed: {len(pallets)}")
 
         st.subheader(":straight_ruler: Pallet Size")
-        st.write(f"Length: {pallet_length} cm, Width: {pallet_width} cm, Height: {max_pallet_height} cm")
+        st.write(f"Input Pallet Dimensions — Length: {pallet_length} cm, Width: {pallet_width} cm, Height: {max_pallet_height} cm")
 
         for i, pallet in enumerate(pallets):
-            st.markdown(f"### 📦 Pallet #{i+1} (Height: {pallet['height']:.1f} cm)")
+            st.markdown(f"### 📦 Pallet #{i+1} (Stack Height: {pallet['height']:.1f} cm)")
             st.dataframe(pd.DataFrame(pallet["boxes"]))
             st.plotly_chart(plot_pallet_3d(pallet, pallet_length, pallet_width, max_pallet_height), use_container_width=True)
+
+            used_L, used_W, used_H = get_used_pallet_dimensions(pallet, pallet_length, pallet_width)
+            st.write(f"**Used Pallet Dimensions:** Length: {used_L:.1f} cm, Width: {used_W:.1f} cm, Height: {used_H:.1f} cm")
 
         if remaining["Quantity"].sum() > 0:
             st.warning(f"Boxes not placed: {remaining['Quantity'].sum()}")
