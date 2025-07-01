@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from itertools import permutations
+from itertools import product
 import plotly.graph_objects as go
 import numpy as np
 
@@ -8,7 +8,7 @@ st.set_page_config(page_title="📦 Multi-Box Palletizer with 3D", layout="wide"
 st.title(":package: Multi-Box Palletizer with 3D Visualization")
 
 st.markdown("""
-Enter up to 10 box types with quantity, dimensions, and rotation option.
+Enter up to 10 box types with quantity, dimensions, and horizontal rotation option.
 The app calculates how to optimally stack boxes on standard pallets (default 120×100×150 cm).
 3D visualization shows the stacked boxes on the pallet.
 """)
@@ -18,6 +18,7 @@ st.sidebar.header(":brick: Pallet Settings")
 pallet_length = st.sidebar.number_input("Pallet Length (cm)", min_value=50.0, value=120.0)
 pallet_width = st.sidebar.number_input("Pallet Width (cm)", min_value=50.0, value=100.0)
 max_pallet_height = st.sidebar.number_input("Max Pallet Height (cm)", min_value=50.0, value=150.0)
+lock_orientation = st.sidebar.checkbox("Lock Orientation (Fix Box Height)", value=False)
 
 # Box input count
 box_count = st.number_input("Number of Box Types (max 10)", min_value=1, max_value=10, value=3)
@@ -29,7 +30,7 @@ default_data = [{
     "Width (cm)": 20,
     "Height (cm)": 15,
     "Quantity": 100,
-    "Allow Rotation": True
+    "Allow Horizontal Rotation": True
 } for i in range(box_count)]
 
 box_df = st.data_editor(
@@ -39,10 +40,16 @@ box_df = st.data_editor(
     key="box_input"
 )
 
-def calculate_fit_for_box(pallet_L, pallet_W, max_H, box_L, box_W, box_H, qty, allow_rotate):
+def calculate_fit_for_box(pallet_L, pallet_W, max_H, box_L, box_W, box_H, qty, allow_horizontal, lock_orient):
     best_fit = 0
     best_layout = None
-    orientations = permutations((box_L, box_W, box_H)) if allow_rotate else [(box_L, box_W, box_H)]
+    if lock_orient:
+        orientations = [(box_L, box_W, box_H)]
+    else:
+        orientations = [(box_L, box_W, box_H)]
+        if allow_horizontal:
+            orientations.append((box_W, box_L, box_H))
+
     for orient in orientations:
         l, w, h = orient
         fit_L = int(pallet_L // l)
@@ -50,8 +57,8 @@ def calculate_fit_for_box(pallet_L, pallet_W, max_H, box_L, box_W, box_H, qty, a
         fit_H = int(max_H // h)
         total_fit = fit_L * fit_W * fit_H
         placed = min(qty, total_fit)
-        if total_fit > best_fit:
-            best_fit = total_fit
+        if placed > best_fit:
+            best_fit = placed
             best_layout = {
                 "orientation": (l, w, h),
                 "fit_L": fit_L,
@@ -62,7 +69,7 @@ def calculate_fit_for_box(pallet_L, pallet_W, max_H, box_L, box_W, box_H, qty, a
             }
     return best_layout, best_fit
 
-def pack_boxes_on_pallets(boxes, pallet_L, pallet_W, max_H):
+def pack_boxes_on_pallets(boxes, pallet_L, pallet_W, max_H, lock_orient):
     pallets = []
     remaining_boxes = boxes.copy()
     while remaining_boxes["Quantity"].sum() > 0:
@@ -73,7 +80,7 @@ def pack_boxes_on_pallets(boxes, pallet_L, pallet_W, max_H):
             layout, max_fit = calculate_fit_for_box(
                 pallet_L, pallet_W, max_H,
                 row["Length (cm)"], row["Width (cm)"], row["Height (cm)"],
-                row["Quantity"], row["Allow Rotation"]
+                row["Quantity"], row["Allow Horizontal Rotation"], lock_orient
             )
             if layout is None or layout["placed"] == 0:
                 continue
@@ -148,7 +155,7 @@ if st.button(":mag: Calculate Palletization"):
         st.error("Please enter box data")
     else:
         boxes = box_df.copy()
-        pallets, remaining = pack_boxes_on_pallets(boxes, pallet_length, pallet_width, max_pallet_height)
+        pallets, remaining = pack_boxes_on_pallets(boxes, pallet_length, pallet_width, max_pallet_height, lock_orientation)
         st.success(f"Total pallets needed: {len(pallets)}")
 
         st.subheader(":straight_ruler: Pallet Size")
