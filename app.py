@@ -24,7 +24,7 @@ box_count = st.number_input("Number of Box Types (max 10)", min_value=1, max_val
 
 # Default input
 default_data = [{
-    "Box Name": f"Box {i+1}",
+    "Part No": f"Part-{i+1}",
     "Length (cm)": 30,
     "Width (cm)": 20,
     "Height (cm)": 15,
@@ -79,7 +79,7 @@ def pack_boxes_on_pallets(boxes, pallet_L, pallet_W, max_H):
                 continue
             placed = layout["placed"]
             pallet["boxes"].append({
-                "Box Name": row["Box Name"],
+                "Part No": row["Part No"],
                 "Placed": placed,
                 "Orientation": layout["orientation"],
                 "fit_L": layout["fit_L"],
@@ -116,7 +116,7 @@ def plot_pallet_3d(pallet, pallet_L, pallet_W, pallet_H):
         l, w, h = box["Orientation"]
         fit_L, fit_W, fit_H = box["fit_L"], box["fit_W"], box["fit_H"]
         placed = box["Placed"]
-        box_name = box["Box Name"]
+        part_no = box["Part No"]
         color = colors[i % len(colors)]
 
         count = 0
@@ -125,10 +125,10 @@ def plot_pallet_3d(pallet, pallet_L, pallet_W, pallet_H):
                 for x in range(fit_L):
                     if count >= placed:
                         break
-                    x_pos = x * l
-                    y_pos = y * w
+                    x_pos = (pallet_L - fit_L * l) / 2 + x * l
+                    y_pos = (pallet_W - fit_W * w) / 2 + y * w
                     z_pos = z * h + z_offset
-                    fig.add_trace(make_cuboid(x_pos, y_pos, z_pos, l, w, h, color, box_name))
+                    fig.add_trace(make_cuboid(x_pos, y_pos, z_pos, l, w, h, color, part_no))
                     count += 1
 
     fig.update_layout(
@@ -150,6 +150,9 @@ if st.button(":mag: Calculate Palletization"):
         boxes = box_df.copy()
         pallets, remaining = pack_boxes_on_pallets(boxes, pallet_length, pallet_width, max_pallet_height)
         st.success(f"Total pallets needed: {len(pallets)}")
+
+        st.subheader(":straight_ruler: Pallet Size")
+        st.write(f"Length: {pallet_length} cm, Width: {pallet_width} cm, Height: {max_pallet_height} cm")
 
         for i, pallet in enumerate(pallets):
             st.markdown(f"### 📦 Pallet #{i+1} (Height: {pallet['height']:.1f} cm)")
