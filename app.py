@@ -1,13 +1,16 @@
 import streamlit as st
 import pandas as pd
 from itertools import permutations
+import plotly.graph_objects as go
+import numpy as np
 
-st.set_page_config(page_title="📦 Multi-Box Palletizer", layout="wide")
-st.title("📦 Multi-Box Palletizer (Standard Pallet)")
+st.set_page_config(page_title="📦 Multi-Box Palletizer with 3D", layout="wide")
+st.title("📦 Multi-Box Palletizer with 3D Visualization")
 
 st.markdown("""
 Enter up to 10 box types with quantity, dimensions, and rotation option.
 The app calculates how to optimally stack boxes on standard pallets (default 120×100×150 cm).
+3D visualization shows the stacked boxes on the pallet.
 """)
 
 # Sidebar pallet settings
@@ -19,7 +22,6 @@ max_pallet_height = st.sidebar.number_input("Max Pallet Height (cm)", min_value=
 # Box input count
 box_count = st.number_input("Number of Box Types (max 10)", min_value=1, max_value=10, value=3)
 
-# Default box input data
 default_data = [{
     "Box Name": f"Box {i+1}",
     "Length (cm)": 30,
@@ -111,6 +113,105 @@ def pack_boxes_on_pallets(boxes, pallet_L, pallet_W, max_H):
 
     return pallets, remaining_boxes
 
+def make_cuboid(x, y, z, l, w, h, color, name):
+    # Create vertices of cuboid at position x,y,z with size l,w,h
+    # Return Plotly Mesh3d trace for the cuboid
+    vertices = np.array([
+        [x, y, z],
+        [x + l, y, z],
+        [x + l, y + w, z],
+        [x, y + w, z],
+        [x, y, z + h],
+        [x + l, y, z + h],
+        [x + l, y + w, z + h],
+        [x, y + w, z + h],
+    ])
+
+    I = [0, 0, 0, 3, 4, 4, 7, 1, 1, 2, 5, 6]
+    J = [1, 3, 4, 2, 5, 7, 6, 2, 5, 3, 6, 7]
+    K = [3, 2, 5, 6, 7, 3, 2, 5, 6, 7, 7, 4]
+
+    return go.Mesh3d(
+        x=vertices[:, 0],
+        y=vertices[:, 1],
+        z=vertices[:, 2],
+        color=color,
+        opacity=0.5,
+        i=I,
+        j=J,
+        k=K,
+        name=name,
+        hoverinfo="name"
+    )
+
+def plot_pallet_3d(pallet, pallet_L, pallet_W, pallet_H):
+    fig = go.Figure()
+
+    # Draw pallet base
+    fig.add_trace(go.Mesh3d(
+        x=[0, pallet_L, pallet_L, 0, 0, pallet_L, pallet_L, 0],
+        y=[0, 0, pallet_W, pallet_W, 0, 0, pallet_W, pallet_W],
+        z=[0, 0, 0, 0, 2, 2, 2, 2],  # Pallet thickness 2 cm
+        color='saddlebrown',
+        opacity=0.7,
+        i=[0, 0, 0, 3, 4, 4, 7, 1, 1, 2, 5, 6],
+        j=[1, 3, 4, 2, 5, 7, 6, 2, 5, 3, 6, 7],
+        k=[3, 2, 5, 6, 7, 3, 2, 5, 6, 7, 7, 4],
+        name="Pallet Base",
+        hoverinfo="skip"
+    ))
+
+    colors = ['red', 'blue', 'green', 'orange', 'purple', 'cyan', 'magenta', 'yellow', 'brown', 'pink']
+
+    current_z = 2  # Start stacking above pallet thickness
+    for i, box in enumerate(pallet["boxes"]):
+        count = box["Placed"]
+        l, w, h = box["Orientation"]
+        boxes_per_layer = box["Boxes per Layer"]
+        layers = box["Layers"]
+
+        # Calculate how many full layers and leftover boxes
+        full_layers = count // boxes_per_layer
+        leftover = count % boxes_per_layer
+
+        color = colors[i % len(colors)]
+        name = box["Box Name"]
+
+        # Position boxes in layers
+        for layer in range(full_layers):
+            for idx_in_layer in range(boxes_per_layer):
+                # Calculate position (simple row-major)
+                x_pos = (idx_in_layer % box["Boxes per Layer"]) * l
+                y_pos = (idx_in_layer // box["Boxes per Layer"]) * w
+                z_pos = current_z + layer * h
+
+                # Check if box fits in pallet bounds - just safety check
+                if x_pos + l <= pallet_L and y_pos + w <= pallet_W:
+                    fig.add_trace(make_cuboid(x_pos, y_pos, z_pos, l, w, h, color, name))
+
+        # Leftover boxes on next layer
+        for idx in range(leftover):
+            x_pos = (idx % box["Boxes per Layer"]) * l
+            y_pos = (idx // box["Boxes per Layer"]) * w
+            z_pos = current_z + full_layers * h
+            if x_pos + l <= pallet_L and y_pos + w <= pallet_W:
+                fig.add_trace(make_cuboid(x_pos, y_pos, z_pos, l, w, h, color, name))
+
+        current_z += layers * h
+
+    fig.update_layout(
+        scene=dict(
+            xaxis=dict(title='Length (cm)', range=[0, pallet_L]),
+            yaxis=dict(title='Width (cm)', range=[0, pallet_W]),
+            zaxis=dict(title='Height (cm)', range=[0, pallet_H]),
+            aspectmode='data'
+        ),
+        margin=dict(l=0, r=0, t=30, b=0),
+        height=700,
+        showlegend=True
+    )
+    return fig
+
 if st.button("🔍 Calculate Palletization"):
     if box_df.empty:
         st.error("Please enter box data")
@@ -124,6 +225,8 @@ if st.button("🔍 Calculate Palletization"):
             st.markdown(f"### 📦 Pallet #{i+1} (Height: {pallet['height']:.1f} cm)")
             df = pd.DataFrame(pallet["boxes"])
             st.dataframe(df)
+
+            st.plotly_chart(plot_pallet_3d(pallet, pallet_length, pallet_width, max_pallet_height), use_container_width=True)
 
         if remaining["Quantity"].sum() > 0:
             st.warning(f"⚠️ Remaining boxes not placed: {remaining['Quantity'].sum()}")
