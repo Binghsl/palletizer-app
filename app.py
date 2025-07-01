@@ -174,7 +174,7 @@ def get_used_pallet_dimensions(pallet, pallet_L, pallet_W, pallet_base_height):
                     max_z = max(max_z, z_pos + h)
                     count += 1
 
-    return max_x, max_y, max_z - pallet_base_height  # return cargo height only
+    return max_x, max_y, max_z - pallet_base_height  # cargo height only
 
 if st.button(":mag: Calculate Palletization"):
     if box_df.empty:
