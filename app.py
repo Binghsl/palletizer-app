@@ -5,12 +5,12 @@ from rectpack import newPacker
 import plotly.graph_objects as go
 
 st.set_page_config(page_title="📦 Multi-Box Palletizer with 3D", layout="wide")
-st.title(":package: Multi-Box Palletizer with 3D Visualization (Optimized)")
+st.title(":package: Multi-Box Palletizer with 3D Visualization (Iterative Optimized)")
 
 st.markdown("""
 Enter up to 10 box types with quantity, dimensions, and horizontal rotation (height fixed).
 The app calculates how to optimally stack boxes on standard pallets (default 120×100×150 cm).
-Each layer is packed using a 2D bin packing algorithm for maximum efficiency.
+Each layer is packed using a 2D bin packing algorithm, repeatedly, for maximum efficiency.
 3D visualization shows the stacked boxes on the pallet.
 """)
 
@@ -53,7 +53,6 @@ def pack_layer_rectpack(boxes, pallet_L, pallet_W):
         x, y, w, h, bin_id, box_idx = rect
         part_no = boxes.at[box_idx, "Part No"]
         box_h = boxes.at[box_idx, "Height (cm)"]
-        # Save orientation (rotation) info
         l = boxes.at[box_idx, "Length (cm)"]
         orig_w = boxes.at[box_idx, "Width (cm)"]
         orientation = (w, h) if (w != l or h != orig_w) else (l, orig_w)
@@ -65,36 +64,53 @@ def pack_layer_rectpack(boxes, pallet_L, pallet_W):
             "Box Index": box_idx
         })
         used_qty[box_idx] = used_qty.get(box_idx, 0) + 1
-    # Return placed boxes and a dict of used quantities per index
     return placed, used_qty
 
-def pack_boxes_on_pallets_rectpack(boxes, pallet_L, pallet_W, max_H, pallet_base_H):
+def pack_boxes_on_pallets_rectpack_iterative(boxes, pallet_L, pallet_W, max_H, pallet_base_H):
     pallets = []
     remaining_boxes = boxes.copy()
-    # Only allow horizontal rotation (height fixed)
     while remaining_boxes["Quantity"].sum() > 0:
         pallet = {"boxes": [], "height": 0, "layers": []}
         z_offset = pallet_base_H
-        layer_height = None
+        # Track layer heights for top layer constraint if needed
+        layer_index = 0
         while z_offset < pallet_base_H + max_H and remaining_boxes["Quantity"].sum() > 0:
-            # For each layer, use rectpack
-            layer_boxes, used_qty = pack_layer_rectpack(remaining_boxes, pallet_L, pallet_W)
+            # Iteratively fill the layer
+            layer_boxes = []
+            layer_used_qty = {}
+            layer_height = None
+            # Make a copy of remaining_boxes for this layer iteration
+            layer_remaining = remaining_boxes.copy()
+            while True:
+                placed, used_qty = pack_layer_rectpack(layer_remaining, pallet_L, pallet_W)
+                if not placed:
+                    break
+                # Place boxes at z = z_offset
+                for b in placed:
+                    b["Position3D"] = (b["Position"][0], b["Position"][1], z_offset)
+                layer_boxes.extend(placed)
+                # Update layer_remaining for next round
+                for idx, used in used_qty.items():
+                    layer_remaining.at[idx, "Quantity"] -= used
+                    # Track for overall layer
+                    layer_used_qty[idx] = layer_used_qty.get(idx, 0) + used
+                # If all quantities are zero, end this layer
+                if layer_remaining["Quantity"].sum() == 0:
+                    break
             if not layer_boxes:
                 break
             # All boxes in this layer must have same height (fixed)
             layer_height = max([b["Dimensions"][2] for b in layer_boxes])
-            # Place boxes at z = z_offset
             for b in layer_boxes:
-                b["Position3D"] = (b["Position"][0], b["Position"][1], z_offset)
                 b["Height"] = layer_height
             pallet["layers"].append(layer_boxes)
             pallet["boxes"].extend(layer_boxes)
-            # Update remaining
-            for idx, used in used_qty.items():
+            # Update remaining_boxes for next layer
+            for idx, used in layer_used_qty.items():
                 remaining_boxes.at[idx, "Quantity"] -= used
             pallet["height"] += layer_height
             z_offset += layer_height
-            # Next layer must not exceed footprint of previous layer
+            layer_index += 1
         pallets.append(pallet)
         if len(pallets) > 100:
             break
@@ -150,7 +166,7 @@ if st.button(":mag: Calculate Palletization"):
         st.error("Please enter box data")
     else:
         boxes = box_df.copy()
-        pallets, remaining = pack_boxes_on_pallets_rectpack(boxes, pallet_length, pallet_width, max_pallet_height, pallet_base_height)
+        pallets, remaining = pack_boxes_on_pallets_rectpack_iterative(boxes, pallet_length, pallet_width, max_pallet_height, pallet_base_height)
         st.success(f"Total pallets needed: {len(pallets)}")
 
         st.subheader(":straight_ruler: Pallet Size")
@@ -166,7 +182,8 @@ if st.button(":mag: Calculate Palletization"):
                     "Box Dimensions (LWH)": box["Dimensions"]
                 })
             st.dataframe(pd.DataFrame(boxes_table))
-            st.plotly_chart(plot_pallet_3d(pallet, pallet_length, pallet_width, max_pallet_height, pallet_base_height), use_container_width=True)
+            fig = plot_pallet_3d(pallet, pallet_length, pallet_width, max_pallet_height, pallet_base_height)
+            st.plotly_chart(fig, use_container_width=True, key=f'plotly_chart_{i}')
 
             used_L, used_W, cargo_H = get_used_pallet_dimensions(pallet, pallet_length, pallet_width, pallet_base_height)
             total_H = pallet_base_height + cargo_H
