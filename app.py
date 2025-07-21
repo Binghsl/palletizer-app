@@ -1,15 +1,16 @@
 import streamlit as st
 import pandas as pd
-import plotly.graph_objects as go
 import numpy as np
-import shapely.geometry
+from rectpack import newPacker
+import plotly.graph_objects as go
 
 st.set_page_config(page_title="📦 Multi-Box Palletizer with 3D", layout="wide")
-st.title(":package: Multi-Box Palletizer with 3D Visualization")
+st.title(":package: Multi-Box Palletizer with 3D Visualization (Optimized)")
 
 st.markdown("""
-Enter up to 10 box types with quantity, dimensions, and horizontal rotation option.
+Enter up to 10 box types with quantity, dimensions, and horizontal rotation (height fixed).
 The app calculates how to optimally stack boxes on standard pallets (default 120×100×150 cm).
+Each layer is packed using a 2D bin packing algorithm for maximum efficiency.
 3D visualization shows the stacked boxes on the pallet.
 """)
 
@@ -19,19 +20,15 @@ pallet_length = st.sidebar.number_input("Pallet Length (cm)", min_value=50.0, va
 pallet_width = st.sidebar.number_input("Pallet Width (cm)", min_value=50.0, value=100.0)
 max_pallet_height = st.sidebar.number_input("Max Pallet Height (cm)", min_value=50.0, value=150.0)
 pallet_base_height = st.sidebar.number_input("Pallet Base Height (cm)", min_value=5.0, value=20.0)
-lock_orientation = st.sidebar.checkbox("Lock Orientation (Fix Box Height)", value=False)
 
-# Box input count
 box_count = st.number_input("Number of Box Types (max 10)", min_value=1, max_value=10, value=3)
 
-# Default input
 default_data = [{
     "Part No": f"Part-{i+1}",
     "Length (cm)": 30,
     "Width (cm)": 20,
     "Height (cm)": 15,
-    "Quantity": 100,
-    "Allow Horizontal Rotation": True
+    "Quantity": 100
 } for i in range(box_count)]
 
 box_df = st.data_editor(
@@ -41,88 +38,66 @@ box_df = st.data_editor(
     key="box_input"
 )
 
-def pack_boxes_on_pallets(boxes, pallet_L, pallet_W, max_H, lock_orient):
+def pack_layer_rectpack(boxes, pallet_L, pallet_W):
+    packer = newPacker(rotation=True)  # Only horizontal rotation allowed
+    packer.add_bin(pallet_L, pallet_W)
+    # Add rectangles: (length, width, idx)
+    for idx, box in boxes.iterrows():
+        l, w = box["Length (cm)"], box["Width (cm)"]
+        for _ in range(int(box["Quantity"])):
+            packer.add_rect(l, w, idx)
+    packer.pack()
+    placed = []
+    used_qty = {}
+    for rect in packer.rect_list():
+        x, y, w, h, bin_id, box_idx = rect
+        part_no = boxes.at[box_idx, "Part No"]
+        box_h = boxes.at[box_idx, "Height (cm)"]
+        # Save orientation (rotation) info
+        l = boxes.at[box_idx, "Length (cm)"]
+        orig_w = boxes.at[box_idx, "Width (cm)"]
+        orientation = (w, h) if (w != l or h != orig_w) else (l, orig_w)
+        placed.append({
+            "Part No": part_no,
+            "Position": (x, y),
+            "Dimensions": (w, h, box_h),
+            "Orientation": orientation,
+            "Box Index": box_idx
+        })
+        used_qty[box_idx] = used_qty.get(box_idx, 0) + 1
+    # Return placed boxes and a dict of used quantities per index
+    return placed, used_qty
+
+def pack_boxes_on_pallets_rectpack(boxes, pallet_L, pallet_W, max_H, pallet_base_H):
     pallets = []
     remaining_boxes = boxes.copy()
-
+    # Only allow horizontal rotation (height fixed)
     while remaining_boxes["Quantity"].sum() > 0:
-        pallet = {"boxes": [], "height": 0}
-        z_cursor = 0  # current layer height
-
-        while z_cursor < max_H:
-            placed_in_layer = []
-            layer_height = 0
-            occupied_areas = []
-
-            for idx, row in remaining_boxes.iterrows():
-                qty = row["Quantity"]
-                if qty == 0:
-                    continue
-
-                # Possible horizontal orientations
-                orientations = [(row["Length (cm)"], row["Width (cm)"])]
-                if not lock_orient and row["Allow Horizontal Rotation"]:
-                    alt = (row["Width (cm)"], row["Length (cm)"])
-                    if alt not in orientations:
-                        orientations.append(alt)
-
-                placed_qty = 0
-
-                for l, w in orientations:
-                    h = row["Height (cm)"]
-                    if z_cursor + h > max_H:
-                        continue  # no vertical space
-
-                    max_fit_L = int(pallet_L // l)
-                    max_fit_W = int(pallet_W // w)
-
-                    # Try placing boxes one by one on pallet surface grid
-                    for x_i in range(max_fit_L):
-                        for y_i in range(max_fit_W):
-                            if placed_qty >= qty:
-                                break
-
-                            x0 = x_i * l
-                            y0 = y_i * w
-                            new_box_area = shapely.geometry.box(x0, y0, x0 + l, y0 + w)
-
-                            if any(new_box_area.intersects(area) for area in occupied_areas):
-                                continue  # overlap, skip
-
-                            # Place box
-                            placed_in_layer.append({
-                                "Part No": row["Part No"],
-                                "Placed": 1,
-                                "Orientation": (l, w, h),
-                                "x": x0,
-                                "y": y0,
-                                "z": z_cursor
-                            })
-                            occupied_areas.append(new_box_area)
-                            placed_qty += 1
-
-                        if placed_qty >= qty:
-                            break
-
-                    if placed_qty > 0:
-                        break  # stop checking other orientations
-
-                remaining_boxes.at[idx, "Quantity"] -= placed_qty
-                if placed_qty > 0:
-                    layer_height = max(layer_height, h)
-
-            if not placed_in_layer:
-                break  # no boxes placed in this layer, end
-
-            pallet["boxes"].extend(placed_in_layer)
-            z_cursor += layer_height
-            if z_cursor > pallet["height"]:
-                pallet["height"] = z_cursor
-
+        pallet = {"boxes": [], "height": 0, "layers": []}
+        z_offset = pallet_base_H
+        layer_height = None
+        while z_offset < pallet_base_H + max_H and remaining_boxes["Quantity"].sum() > 0:
+            # For each layer, use rectpack
+            layer_boxes, used_qty = pack_layer_rectpack(remaining_boxes, pallet_L, pallet_W)
+            if not layer_boxes:
+                break
+            # All boxes in this layer must have same height (fixed)
+            layer_height = max([b["Dimensions"][2] for b in layer_boxes])
+            # Place boxes at z = z_offset
+            for b in layer_boxes:
+                b["Position3D"] = (b["Position"][0], b["Position"][1], z_offset)
+                b["Height"] = layer_height
+            pallet["layers"].append(layer_boxes)
+            pallet["boxes"].extend(layer_boxes)
+            # Update remaining
+            for idx, used in used_qty.items():
+                remaining_boxes.at[idx, "Quantity"] -= used
+            pallet["height"] += layer_height
+            z_offset += layer_height
+            # Next layer must not exceed footprint of previous layer
         pallets.append(pallet)
         if len(pallets) > 100:
             break
-
     return pallets, remaining_boxes
 
 def make_cuboid(x, y, z, l, w, h, color, name):
@@ -139,23 +114,13 @@ def make_cuboid(x, y, z, l, w, h, color, name):
 def plot_pallet_3d(pallet, pallet_L, pallet_W, pallet_H, pallet_base_H):
     fig = go.Figure()
     colors = ['red', 'blue', 'green', 'orange', 'purple', 'cyan', 'magenta', 'yellow', 'brown', 'pink']
-
-    # Pallet base
     fig.add_trace(make_cuboid(0, 0, 0, pallet_L, pallet_W, pallet_base_H, 'saddlebrown', 'Pallet Base'))
-
-    # Assign consistent color per Part No
-    part_nos = list({box["Part No"] for box in pallet["boxes"]})
-    color_map = {pn: colors[i % len(colors)] for i, pn in enumerate(part_nos)}
-
-    for box in pallet["boxes"]:
-        l, w, h = box["Orientation"]
-        x = box["x"]
-        y = box["y"]
-        z = box["z"] + pallet_base_H  # add pallet base height
+    for i, box in enumerate(pallet["boxes"]):
+        l, w, h = box["Dimensions"]
+        x, y, z = box["Position3D"]
         part_no = box["Part No"]
-        color = color_map.get(part_no, 'gray')
+        color = colors[i % len(colors)]
         fig.add_trace(make_cuboid(x, y, z, l, w, h, color, part_no))
-
     fig.update_layout(
         scene=dict(
             xaxis=dict(title='Length (cm)', range=[0, pallet_L]),
@@ -173,14 +138,11 @@ def get_used_pallet_dimensions(pallet, pallet_L, pallet_W, pallet_base_height):
     max_y = 0
     max_z = 0
     for box in pallet["boxes"]:
-        l, w, h = box["Orientation"]
-        x = box["x"]
-        y = box["y"]
-        z = box["z"] + pallet_base_height
+        l, w, h = box["Dimensions"]
+        x, y, z = box["Position3D"]
         max_x = max(max_x, x + l)
         max_y = max(max_y, y + w)
         max_z = max(max_z, z + h)
-
     return max_x, max_y, max_z - pallet_base_height  # cargo height only
 
 if st.button(":mag: Calculate Palletization"):
@@ -188,7 +150,7 @@ if st.button(":mag: Calculate Palletization"):
         st.error("Please enter box data")
     else:
         boxes = box_df.copy()
-        pallets, remaining = pack_boxes_on_pallets(boxes, pallet_length, pallet_width, max_pallet_height, lock_orientation)
+        pallets, remaining = pack_boxes_on_pallets_rectpack(boxes, pallet_length, pallet_width, max_pallet_height, pallet_base_height)
         st.success(f"Total pallets needed: {len(pallets)}")
 
         st.subheader(":straight_ruler: Pallet Size")
@@ -196,7 +158,14 @@ if st.button(":mag: Calculate Palletization"):
 
         for i, pallet in enumerate(pallets):
             st.markdown(f"### 📦 Pallet #{i+1} (Stack Height: {pallet['height']:.1f} cm)")
-            st.dataframe(pd.DataFrame(pallet["boxes"]))
+            boxes_table = []
+            for box in pallet["boxes"]:
+                boxes_table.append({
+                    "Part No": box["Part No"],
+                    "Position (L,W,H)": box["Position3D"],
+                    "Box Dimensions (LWH)": box["Dimensions"]
+                })
+            st.dataframe(pd.DataFrame(boxes_table))
             st.plotly_chart(plot_pallet_3d(pallet, pallet_length, pallet_width, max_pallet_height, pallet_base_height), use_container_width=True)
 
             used_L, used_W, cargo_H = get_used_pallet_dimensions(pallet, pallet_length, pallet_width, pallet_base_height)
