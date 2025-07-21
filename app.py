@@ -1,18 +1,16 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from rectpack import newPacker
-import plotly.graph_objects as go
+import io
 
-st.set_page_config(page_title="📦 Efficient Palletizer with 3D Visualization", layout="wide")
-st.title(":package: Efficient Multi-Box Palletizer with 3D Visualization")
+st.set_page_config(page_title="📦 CBM Palletizer", layout="wide")
+st.title(":package: Palletizer based on CBM (Cubic Meter) Optimization")
 
 st.markdown("""
 Enter box types with quantity and dimensions.  
-The app calculates how to optimally stack boxes on standard pallets (default 120×100×150 cm, base 20 cm).  
-Each layer is packed using a 2D bin packing algorithm.  
-Layers can include any boxes that fit; the layer height is set by the tallest box in the layer.  
-3D visualization shows the stacked boxes on the pallet.
+The app calculates how to optimally pack boxes on pallets based on CBM (cubic meter) utilization.  
+No geometric packing—boxes are packed greedily by volume until the pallet volume is reached.
+You can download a single CSV file containing all pallets' packing lists.
 """)
 
 # --- Sidebar pallet settings ---
@@ -40,128 +38,90 @@ box_df = st.data_editor(
     key="box_input"
 )
 
-def pack_boxes_mixed_layers(boxes, pallet_L, pallet_W, max_H, pallet_base_H):
+def calculate_cbm(length_cm, width_cm, height_cm):
+    # Convert cm to m
+    return (length_cm / 100) * (width_cm / 100) * (height_cm / 100)
+
+def cbm_palletize(boxes, pallet_L, pallet_W, pallet_H, pallet_base_H):
+    # Pallet usable height (without base)
+    usable_H = pallet_H
+    pallet_cbm = calculate_cbm(pallet_L, pallet_W, usable_H)
+    all_boxes = boxes.copy()
+    all_boxes["Box CBM"] = calculate_cbm(all_boxes["Length (cm)"], all_boxes["Width (cm)"], all_boxes["Height (cm)"])
+    all_boxes["Total CBM"] = all_boxes["Box CBM"] * all_boxes["Quantity"]
     pallets = []
-    remaining = boxes.copy()
+    remaining = all_boxes.copy()
     while remaining["Quantity"].sum() > 0:
-        pallet = {"boxes": [], "height": 0, "layers": []}
-        z_offset = pallet_base_H
-        while z_offset < pallet_base_H + max_H and remaining["Quantity"].sum() > 0:
-            # Only consider boxes that fit within the remaining height
-            fit_mask = remaining["Height (cm)"] <= (pallet_base_H + max_H - z_offset)
-            layer_boxes_df = remaining[fit_mask].copy()
-            if layer_boxes_df["Quantity"].sum() == 0:
-                break
-            packer = newPacker(rotation=True)
-            packer.add_bin(pallet_L, pallet_W)
-            rect_indices = []
-            for idx, row in layer_boxes_df.iterrows():
-                l, w = row["Length (cm)"], row["Width (cm)"]
-                for _ in range(int(row["Quantity"])):
-                    packer.add_rect(l, w, len(rect_indices))
-                    rect_indices.append(idx)
-            packer.pack()
-            layer_boxes = []
-            used_qty = {}
-            max_layer_height = 0
-            for rect in packer.rect_list():
-                x, y, w, h, bin_id, rect_idx = rect
-                df_idx = rect_indices[rect_idx]
-                box_height = remaining.loc[df_idx, "Height (cm)"]
-                part_no = remaining.loc[df_idx, "Part No"]
-                max_layer_height = max(max_layer_height, box_height)
-                layer_boxes.append({
-                    "Part No": part_no,
-                    "Position3D": (x, y, z_offset),
-                    "Dimensions": (w, h, box_height),
-                    "Box Index": df_idx
+        pallet = []
+        pallet_used_cbm = 0.0
+        # Sort boxes by CBM descending (try bigger boxes first)
+        sorted_boxes = remaining.sort_values(by="Box CBM", ascending=False)
+        for idx, box in sorted_boxes.iterrows():
+            box_cbm = box["Box CBM"]
+            qty_available = int(box["Quantity"])
+            qty_to_pack = min(qty_available, int((pallet_cbm - pallet_used_cbm) // box_cbm))
+            if qty_to_pack > 0:
+                pallet.append({
+                    "Part No": box["Part No"],
+                    "Packed Qty": qty_to_pack,
+                    "Box CBM": box_cbm,
+                    "Total Packed CBM": qty_to_pack * box_cbm,
+                    "Dims (cm)": f'{box["Length (cm)"]}x{box["Width (cm)"]}x{box["Height (cm)"]}'
                 })
-                used_qty[df_idx] = used_qty.get(df_idx, 0) + 1
-            if not layer_boxes:
-                break
-            pallet["layers"].append(layer_boxes)
-            pallet["boxes"].extend(layer_boxes)
-            for idx, used in used_qty.items():
-                remaining.loc[idx, "Quantity"] -= used
-            pallet["height"] += max_layer_height
-            z_offset += max_layer_height
-        if pallet["boxes"]:
-            pallets.append(pallet)
-    return pallets
+                pallet_used_cbm += qty_to_pack * box_cbm
+                remaining.at[idx, "Quantity"] -= qty_to_pack
+        pallets.append({
+            "boxes": pallet,
+            "pallet_cbm_used": pallet_used_cbm,
+            "pallet_cbm_total": pallet_cbm,
+            "utilization": pallet_used_cbm / pallet_cbm * 100
+        })
+    return pallets, remaining
 
-def make_cuboid(x, y, z, l, w, h, color, name):
-    vertices = np.array([
-        [x, y, z], [x+l, y, z], [x+l, y+w, z], [x, y+w, z],
-        [x, y, z+h], [x+l, y, z+h], [x+l, y+w, z+h], [x, y+w, z+h]
-    ])
-    I = [0, 0, 0, 3, 4, 4, 7, 1, 1, 2, 5, 6]
-    J = [1, 3, 4, 2, 5, 7, 6, 2, 5, 3, 6, 7]
-    K = [3, 2, 5, 6, 7, 3, 2, 5, 6, 7, 7, 4]
-    return go.Mesh3d(x=vertices[:, 0], y=vertices[:, 1], z=vertices[:, 2],
-                     i=I, j=J, k=K, opacity=0.5, color=color, name=name)
+def create_single_csv_packing_list(pallets):
+    # Create a single DataFrame for all pallets
+    all_rows = []
+    for i, pallet in enumerate(pallets):
+        for item in pallet["boxes"]:
+            all_rows.append({
+                "Pallet No": i + 1,
+                "Part No": item["Part No"],
+                "Packed Qty": item["Packed Qty"],
+                "Dims (cm)": item["Dims (cm)"],
+                "Box CBM": item["Box CBM"],
+                "Total Packed CBM": item["Total Packed CBM"],
+                "Pallet CBM Used (m³)": pallet["pallet_cbm_used"],
+                "Pallet CBM Total (m³)": pallet["pallet_cbm_total"],
+                "Utilization (%)": pallet["utilization"]
+            })
+    return pd.DataFrame(all_rows)
 
-def plot_pallet_3d(pallet, pallet_L, pallet_W, pallet_H, pallet_base_H):
-    fig = go.Figure()
-    colors = ['red', 'blue', 'green', 'orange', 'purple', 'cyan', 'magenta', 'yellow', 'brown', 'pink']
-    fig.add_trace(make_cuboid(0, 0, 0, pallet_L, pallet_W, pallet_base_H, 'saddlebrown', 'Pallet Base'))
-    for i, box in enumerate(pallet["boxes"]):
-        l, w, h = box["Dimensions"]
-        x, y, z = box["Position3D"]
-        part_no = box["Part No"]
-        color = colors[i % len(colors)]
-        fig.add_trace(make_cuboid(x, y, z, l, w, h, color, part_no))
-    fig.update_layout(
-        scene=dict(
-            xaxis=dict(title='Length (cm)', range=[0, pallet_L]),
-            yaxis=dict(title='Width (cm)', range=[0, pallet_W]),
-            zaxis=dict(title='Height (cm)', range=[0, pallet_H]),
-            aspectmode='data'
-        ),
-        height=700,
-        margin=dict(l=0, r=0, t=30, b=0)
-    )
-    return fig
-
-def get_used_pallet_dimensions(pallet, pallet_L, pallet_W, pallet_base_height):
-    max_x = 0
-    max_y = 0
-    max_z = 0
-    for box in pallet["boxes"]:
-        l, w, h = box["Dimensions"]
-        x, y, z = box["Position3D"]
-        max_x = max(max_x, x + l)
-        max_y = max(max_y, y + w)
-        max_z = max(max_z, z + h)
-    return max_x, max_y, max_z - pallet_base_height  # cargo height only
-
-if st.button(":mag: Calculate Palletization"):
+if st.button(":mag: Calculate CBM Palletization"):
     if box_df.empty:
         st.error("Please enter box data")
     else:
         boxes = box_df.copy()
-        pallets = pack_boxes_mixed_layers(boxes, pallet_length, pallet_width, max_pallet_height, pallet_base_height)
+        pallets, remaining = cbm_palletize(boxes, pallet_length, pallet_width, max_pallet_height, pallet_base_height)
         st.success(f"Total pallets needed: {len(pallets)}")
 
-        st.subheader(":straight_ruler: Pallet Size")
-        st.write(f"Input Pallet Dimensions — Length: {pallet_length} cm, Width: {pallet_width} cm, Height: {max_pallet_height} cm")
+        st.subheader(":straight_ruler: Pallet CBM")
+        st.write(f"Pallet dimensions: {pallet_length} × {pallet_width} × {max_pallet_height} cm")
+        st.write(f"Pallet CBM: {calculate_cbm(pallet_length, pallet_width, max_pallet_height):.3f} m³")
+
+        # All pallets in one CSV
+        single_df = create_single_csv_packing_list(pallets)
+        st.download_button(
+            label="⬇️ Download FULL packing list (all pallets in one CSV)",
+            data=single_df.to_csv(index=False).encode("utf-8"),
+            file_name="all_pallets_packing_list.csv",
+            mime="text/csv"
+        )
 
         for i, pallet in enumerate(pallets):
-            st.markdown(f"### 📦 Pallet #{i+1} (Stack Height: {pallet['height']:.1f} cm)")
-            boxes_table = []
-            for box in pallet["boxes"]:
-                boxes_table.append({
-                    "Part No": box["Part No"],
-                    "Position (L,W,H)": box["Position3D"],
-                    "Box Dimensions (LWH)": box["Dimensions"]
-                })
-            st.dataframe(pd.DataFrame(boxes_table))
-            fig = plot_pallet_3d(pallet, pallet_length, pallet_width, max_pallet_height, pallet_base_height)
-            st.plotly_chart(fig, use_container_width=True, key=f'plotly_chart_{i}')
-
-            used_L, used_W, cargo_H = get_used_pallet_dimensions(pallet, pallet_length, pallet_width, pallet_base_height)
-            total_H = pallet_base_height + cargo_H
-            total_L = max(pallet_length, used_L)
-            total_W = max(pallet_width, used_W)
-
-            st.write(f"**Total Pallet Dimensions including base:**")
-            st.write(f"Length: {total_L:.1f} cm, Width: {total_W:.1f} cm, Height: {total_H:.1f} cm")
+            st.markdown(f"### 📦 Pallet #{i+1}")
+            st.write(f"CBM Used: {pallet['pallet_cbm_used']:.3f} m³ / {pallet['pallet_cbm_total']:.3f} m³")
+            st.write(f"Utilization: {pallet['utilization']:.1f}%")
+            st.dataframe(pd.DataFrame(pallet["boxes"]))
+        if remaining["Quantity"].sum() > 0:
+            st.warning(f"Boxes not packed: {remaining['Quantity'].sum()}")
+            st.dataframe(remaining)
