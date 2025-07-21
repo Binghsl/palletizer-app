@@ -4,7 +4,7 @@ import numpy as np
 from rectpack import newPacker
 import plotly.graph_objects as go
 
-st.set_page_config(page_title="📦 Multi-Box Palletizer with 3D", layout="wide")
+st.set_page_config(page_title="📦 Multi-Box Palletizer with Layer-by-Height 3D Visualization", layout="wide")
 st.title(":package: Multi-Box Palletizer with Layer-by-Height 3D Visualization")
 
 st.markdown("""
@@ -41,8 +41,8 @@ box_df = st.data_editor(
 
 def pack_boxes_by_height(boxes, pallet_L, pallet_W, max_H, pallet_base_H):
     pallets = []
-    # Group by box height
-    for box_height in sorted(boxes["Height (cm)"].unique(), reverse=True):  # Tallest first
+    # Group by box height (tallest first)
+    for box_height in sorted(boxes["Height (cm)"].unique(), reverse=True):
         group = boxes[boxes["Height (cm)"] == box_height].copy()
         while group["Quantity"].sum() > 0:
             pallet = {"boxes": [], "height": 0, "layers": []}
@@ -51,30 +51,33 @@ def pack_boxes_by_height(boxes, pallet_L, pallet_W, max_H, pallet_base_H):
                 # Prepare layer input
                 packer = newPacker(rotation=True)
                 packer.add_bin(pallet_L, pallet_W)
+                rect_indices = []  # Maps rect index to DataFrame index
                 for idx, row in group.iterrows():
                     l, w = row["Length (cm)"], row["Width (cm)"]
                     for _ in range(int(row["Quantity"])):
-                        packer.add_rect(l, w, idx)
+                        packer.add_rect(l, w, len(rect_indices))
+                        rect_indices.append(idx)
                 packer.pack()
                 layer_boxes = []
                 used_qty = {}
                 for rect in packer.rect_list():
-                    x, y, w, h, bin_id, box_idx = rect
-                    part_no = group.iloc[box_idx]["Part No"]
+                    x, y, w, h, bin_id, rect_idx = rect
+                    df_idx = rect_indices[rect_idx]
+                    part_no = group.loc[df_idx, "Part No"]
                     layer_boxes.append({
                         "Part No": part_no,
                         "Position3D": (x, y, z_offset),
                         "Dimensions": (w, h, box_height),
-                        "Box Index": box_idx
+                        "Box Index": df_idx
                     })
-                    used_qty[box_idx] = used_qty.get(box_idx, 0) + 1
+                    used_qty[df_idx] = used_qty.get(df_idx, 0) + 1
                 if not layer_boxes:
                     # No more boxes fit
                     break
                 pallet["layers"].append(layer_boxes)
                 pallet["boxes"].extend(layer_boxes)
                 for idx, used in used_qty.items():
-                    group.iloc[idx, group.columns.get_loc("Quantity")] -= used
+                    group.loc[idx, "Quantity"] -= used
                 pallet["height"] += box_height
                 z_offset += box_height
             if pallet["boxes"]:
