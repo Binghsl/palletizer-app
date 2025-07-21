@@ -4,17 +4,18 @@ import numpy as np
 from rectpack import newPacker
 import plotly.graph_objects as go
 
-st.set_page_config(page_title="📦 Multi-Box Palletizer with Layer-by-Height 3D Visualization", layout="wide")
-st.title(":package: Multi-Box Palletizer with Layer-by-Height 3D Visualization")
+st.set_page_config(page_title="📦 Efficient Palletizer with 3D Visualization", layout="wide")
+st.title(":package: Efficient Multi-Box Palletizer with 3D Visualization")
 
 st.markdown("""
-Enter box types with quantity, dimensions, and horizontal rotation (height fixed).
-The app calculates how to optimally stack boxes on standard pallets (default 120×100×150 cm).
-Each layer is packed with only boxes of the same height using a 2D bin packing algorithm, maximizing efficiency and respecting the height constraint.
+Enter box types with quantity and dimensions.  
+The app calculates how to optimally stack boxes on standard pallets (default 120×100×150 cm, base 20 cm).  
+Each layer is packed using a 2D bin packing algorithm.  
+Layers can include any boxes that fit; the layer height is set by the tallest box in the layer.  
 3D visualization shows the stacked boxes on the pallet.
 """)
 
-# Sidebar pallet settings
+# --- Sidebar pallet settings ---
 st.sidebar.header(":brick: Pallet Settings")
 pallet_length = st.sidebar.number_input("Pallet Length (cm)", min_value=50.0, value=120.0)
 pallet_width = st.sidebar.number_input("Pallet Width (cm)", min_value=50.0, value=100.0)
@@ -39,49 +40,53 @@ box_df = st.data_editor(
     key="box_input"
 )
 
-def pack_boxes_by_height(boxes, pallet_L, pallet_W, max_H, pallet_base_H):
+def pack_boxes_mixed_layers(boxes, pallet_L, pallet_W, max_H, pallet_base_H):
     pallets = []
-    # Group by box height (tallest first)
-    for box_height in sorted(boxes["Height (cm)"].unique(), reverse=True):
-        group = boxes[boxes["Height (cm)"] == box_height].copy()
-        while group["Quantity"].sum() > 0:
-            pallet = {"boxes": [], "height": 0, "layers": []}
-            z_offset = pallet_base_H
-            while z_offset + box_height <= pallet_base_H + max_H and group["Quantity"].sum() > 0:
-                # Prepare layer input
-                packer = newPacker(rotation=True)
-                packer.add_bin(pallet_L, pallet_W)
-                rect_indices = []  # Maps rect index to DataFrame index
-                for idx, row in group.iterrows():
-                    l, w = row["Length (cm)"], row["Width (cm)"]
-                    for _ in range(int(row["Quantity"])):
-                        packer.add_rect(l, w, len(rect_indices))
-                        rect_indices.append(idx)
-                packer.pack()
-                layer_boxes = []
-                used_qty = {}
-                for rect in packer.rect_list():
-                    x, y, w, h, bin_id, rect_idx = rect
-                    df_idx = rect_indices[rect_idx]
-                    part_no = group.loc[df_idx, "Part No"]
-                    layer_boxes.append({
-                        "Part No": part_no,
-                        "Position3D": (x, y, z_offset),
-                        "Dimensions": (w, h, box_height),
-                        "Box Index": df_idx
-                    })
-                    used_qty[df_idx] = used_qty.get(df_idx, 0) + 1
-                if not layer_boxes:
-                    # No more boxes fit
-                    break
-                pallet["layers"].append(layer_boxes)
-                pallet["boxes"].extend(layer_boxes)
-                for idx, used in used_qty.items():
-                    group.loc[idx, "Quantity"] -= used
-                pallet["height"] += box_height
-                z_offset += box_height
-            if pallet["boxes"]:
-                pallets.append(pallet)
+    remaining = boxes.copy()
+    while remaining["Quantity"].sum() > 0:
+        pallet = {"boxes": [], "height": 0, "layers": []}
+        z_offset = pallet_base_H
+        while z_offset < pallet_base_H + max_H and remaining["Quantity"].sum() > 0:
+            # Only consider boxes that fit within the remaining height
+            fit_mask = remaining["Height (cm)"] <= (pallet_base_H + max_H - z_offset)
+            layer_boxes_df = remaining[fit_mask].copy()
+            if layer_boxes_df["Quantity"].sum() == 0:
+                break
+            packer = newPacker(rotation=True)
+            packer.add_bin(pallet_L, pallet_W)
+            rect_indices = []
+            for idx, row in layer_boxes_df.iterrows():
+                l, w = row["Length (cm)"], row["Width (cm)"]
+                for _ in range(int(row["Quantity"])):
+                    packer.add_rect(l, w, len(rect_indices))
+                    rect_indices.append(idx)
+            packer.pack()
+            layer_boxes = []
+            used_qty = {}
+            max_layer_height = 0
+            for rect in packer.rect_list():
+                x, y, w, h, bin_id, rect_idx = rect
+                df_idx = rect_indices[rect_idx]
+                box_height = remaining.loc[df_idx, "Height (cm)"]
+                part_no = remaining.loc[df_idx, "Part No"]
+                max_layer_height = max(max_layer_height, box_height)
+                layer_boxes.append({
+                    "Part No": part_no,
+                    "Position3D": (x, y, z_offset),
+                    "Dimensions": (w, h, box_height),
+                    "Box Index": df_idx
+                })
+                used_qty[df_idx] = used_qty.get(df_idx, 0) + 1
+            if not layer_boxes:
+                break
+            pallet["layers"].append(layer_boxes)
+            pallet["boxes"].extend(layer_boxes)
+            for idx, used in used_qty.items():
+                remaining.loc[idx, "Quantity"] -= used
+            pallet["height"] += max_layer_height
+            z_offset += max_layer_height
+        if pallet["boxes"]:
+            pallets.append(pallet)
     return pallets
 
 def make_cuboid(x, y, z, l, w, h, color, name):
@@ -134,7 +139,7 @@ if st.button(":mag: Calculate Palletization"):
         st.error("Please enter box data")
     else:
         boxes = box_df.copy()
-        pallets = pack_boxes_by_height(boxes, pallet_length, pallet_width, max_pallet_height, pallet_base_height)
+        pallets = pack_boxes_mixed_layers(boxes, pallet_length, pallet_width, max_pallet_height, pallet_base_height)
         st.success(f"Total pallets needed: {len(pallets)}")
 
         st.subheader(":straight_ruler: Pallet Size")
