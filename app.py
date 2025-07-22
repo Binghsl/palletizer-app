@@ -3,15 +3,18 @@ import pandas as pd
 import numpy as np
 import math
 
-st.set_page_config(page_title="📦 Pallet Layer Simulation with Height Limit", layout="wide")
-st.title(":package: Pallet Layer Simulation - Height Limit 135–140cm (boxes), 150–155cm (total)")
+st.set_page_config(page_title="📦 Pallet Layer Simulation (No Part No. Grouping)", layout="wide")
+st.title(":package: Pallet Layer Simulation - Group by Dimension Only, Free Mix Leftovers")
 
 st.markdown("""
 **Layer stacking rules:**  
-1. Group those with the same layer dimension and palletize them (no mixing PNs or dimensions for these full pallets).  
-2. Only allow mixed loading (even for different PNs and dimensions) for remaining pallet layers ("leftover layers").  
-3. The stacked box height per pallet must be between **135 and 140 cm** (not including the pallet base).  
-4. The pallet base is **15 cm**; total pallet height = base + boxes = **150–155 cm**.  
+1. Group layers by box dimensions only (Box Length, Box Width, Box Height, Box/Layer, Max Layer).  
+   - Do **not** use Part No. in grouping.  
+   - Stack layers on a pallet up to the max allowed (by Max Layer and box height sum 135–140 cm).  
+   - PNs can be mixed in these full pallets if their box dimensions match.  
+2. Leftover layers are freely mixed (any PN, any dimension) up to the largest available Max Layer and total stacked box height 135–140 cm.
+3. Pallet base is 15 cm, so total pallet height is 150–155 cm.
+4. For "mixed" pallets, box columns show "Mixed" and a Layer Summary describes the contents.
 """)
 
 st.header("Upload or Edit Raw Data")
@@ -41,10 +44,8 @@ def explode_layers(df):
     layers = []
     for idx, row in df.iterrows():
         qty_left = row["Quantity"]
-        for layer_idx in range(math.ceil(row["Quantity"] / row["Box/Layer"])):
+        for _ in range(math.ceil(row["Quantity"] / row["Box/Layer"])):
             layer_boxes = min(row["Box/Layer"], qty_left)
-            if layer_boxes < row["Box/Layer"] and qty_left > 0:
-                layer_boxes = row["Box/Layer"]
             layers.append({
                 "Part No": row["Part No"],
                 "Box Length": row["Length (cm)"],
@@ -56,42 +57,55 @@ def explode_layers(df):
                 "Layer Height": row["Height (cm)"],
                 "Layer Source": idx
             })
-            qty_left -= min(layer_boxes, qty_left)
+            qty_left -= layer_boxes
     return layers
 
-def pack_layers_height_limit(layers):
+def pack_full_pallets_by_dimensions(layers):
+    # Group by box dimensions (but NOT Part No)
     pallets = []
     unassigned_layers = []
     df_layers = pd.DataFrame(layers)
     if len(df_layers) == 0:
         return [], []
 
-    group_cols = ["Box Length", "Box Width", "Box Height", "Box/Layer", "Max Layer", "Part No"]
+    group_cols = ["Box Length", "Box Width", "Box Height", "Box/Layer", "Max Layer"]
+    # Group layers by dimension set
     for key, group in df_layers.groupby(group_cols):
         group = group.copy().reset_index(drop=True)
-        layer_idx = 0
+        # For each group, sort by Part No (for reporting only)
+        group = group.sort_values("Part No").reset_index(drop=True)
         n_layers = len(group)
-        while layer_idx < n_layers:
+        used = np.zeros(n_layers, dtype=bool)
+        idx = 0
+        while idx < n_layers:
             stack = []
             stack_height = 0
             max_layer = key[4]
-            # Try to stack as many as possible without going over max_stack_height, up to max_layer
-            while (layer_idx < n_layers and
-                   len(stack) < max_layer and
-                   stack_height + group.loc[layer_idx, "Layer Height"] <= max_stack_height):
-                stack.append(group.loc[layer_idx])
-                stack_height += group.loc[layer_idx, "Layer Height"]
-                layer_idx += 1
-            # If no layer could be added (layer itself is too tall), forcibly add for progress
-            if not stack and layer_idx < n_layers:
-                stack.append(group.loc[layer_idx])
-                stack_height += group.loc[layer_idx, "Layer Height"]
-                layer_idx += 1
+            # Stack up to max_layer and not over height
+            j = idx
+            while j < n_layers and len(stack) < max_layer:
+                h = group.loc[j, "Layer Height"]
+                if used[j]:
+                    j += 1
+                    continue
+                if stack_height + h > max_stack_height:
+                    break
+                stack.append(group.loc[j])
+                stack_height += h
+                used[j] = True
+                j += 1
+            # If nothing added, forcibly add one for progress
+            if not stack and idx < n_layers and not used[idx]:
+                stack.append(group.loc[idx])
+                stack_height += group.loc[idx, "Layer Height"]
+                used[idx] = True
             if stack:
+                # Report unique PNs for this stack
+                part_nos = sorted(set(l["Part No"] for l in stack))
                 util = stack_height / (max_layer * key[2]) * 100 if max_layer > 0 else 0
                 pallets.append({
-                    "Pallet Group": "Full (No Mix)",
-                    "Part Nos": [stack[0]["Part No"]],
+                    "Pallet Group": "Full (No Mix of Dimensions)",
+                    "Part Nos": part_nos,
                     "Box Length": key[0],
                     "Box Width": key[1],
                     "Box Height": key[2],
@@ -103,44 +117,50 @@ def pack_layers_height_limit(layers):
                     "Height Utilization (%)": round(util, 1),
                     "Layer Details": [dict(l) for l in stack]
                 })
-    # Collect all leftover layers in one list for mixed packing
-    # (all layers not used in above logic are not possible here, as all group layers are packed)
-    return pallets, []
+            # Move to next unused layer
+            idx += 1
+            while idx < n_layers and used[idx]:
+                idx += 1
+        # Any unused layers (shouldn't happen, but for safety)
+        for i in range(n_layers):
+            if not used[i]:
+                unassigned_layers.append(group.loc[i])
+    return pallets, unassigned_layers
 
-def pack_leftover_layers_any_mix(layers):
-    # Mix loading for remaining layers - allow any combination, fill up to height limit
+def pack_leftover_layers_any_mix(unassigned_layers):
+    # Mix loading for remaining layers - allow any combination, fill up to height/max_layer
     pallets = []
-    if not layers:
+    if not unassigned_layers:
         return pallets
-    df_layers = pd.DataFrame(layers)
+    df_layers = pd.DataFrame(unassigned_layers)
     available_layers = df_layers.copy().reset_index(drop=True)
     n_layers = len(available_layers)
-    used = set()
+    used = np.zeros(n_layers, dtype=bool)
     idx = 0
     while idx < n_layers:
         stack = []
         stack_height = 0
-        # Use the largest max_layer among leftovers for this pallet
-        max_layer = available_layers.loc[idx:, "Max Layer"].max()
-        # Stack as many as possible without exceeding max_stack_height or max_layer
-        j = idx
-        while j < n_layers and len(stack) < max_layer:
-            if j in used:
-                j += 1
-                continue
+        # Use the largest max_layer among the available leftover layers for this pallet
+        not_used_idxs = [i for i in range(n_layers) if not used[i]]
+        if not not_used_idxs:
+            break
+        max_layer = available_layers.loc[not_used_idxs, "Max Layer"].max()
+        # Stack as many as possible up to max_layer and height
+        for j in not_used_idxs:
             h = available_layers.loc[j, "Layer Height"]
+            if len(stack) >= max_layer:
+                break
             if stack_height + h > max_stack_height:
-                j += 1
                 continue
             stack.append(available_layers.loc[j])
             stack_height += h
-            used.add(j)
-            j += 1
+            used[j] = True
         # If nothing added, forcibly add one for progress
-        if not stack and idx < n_layers and idx not in used:
-            stack.append(available_layers.loc[idx])
-            stack_height += available_layers.loc[idx, "Layer Height"]
-            used.add(idx)
+        if not stack:
+            j = not_used_idxs[0]
+            stack.append(available_layers.loc[j])
+            stack_height += available_layers.loc[j, "Layer Height"]
+            used[j] = True
         if stack:
             all_pns = sorted(set(l["Part No"] for l in stack))
             dim_str = "; ".join(
@@ -162,9 +182,9 @@ def pack_leftover_layers_any_mix(layers):
                 "Layer Details": [dict(l) for l in stack],
                 "Layer Summary": dim_str
             })
+        # Move idx to next unused
         idx += 1
-        # Move idx to next unused layer
-        while idx < n_layers and idx in used:
+        while idx < n_layers and used[idx]:
             idx += 1
     return pallets
 
@@ -197,8 +217,7 @@ if st.button("Simulate and Consolidate"):
         st.error("Please enter box data")
     else:
         layers = explode_layers(box_df)
-        full_pallets, unassigned_layers = pack_layers_height_limit(layers)
-        # (No unassigned layers since all are packed, but if a more advanced logic is used, pass leftovers to mix logic)
+        full_pallets, unassigned_layers = pack_full_pallets_by_dimensions(layers)
         mixed_pallets = pack_leftover_layers_any_mix(unassigned_layers)
         all_pallets = full_pallets + mixed_pallets
         csv_df = create_consolidated_csv(all_pallets, pallet_length, pallet_width, pallet_base_height)
@@ -213,7 +232,6 @@ if st.button("Simulate and Consolidate"):
 
         st.dataframe(csv_df)
 
-        # Show only each pallet's dimensions at the end
         st.header("Pallet Dimensions Summary")
         for i, p in enumerate(all_pallets):
             total_height = pallet_base_height + p["Pallet Height (cm)"]
