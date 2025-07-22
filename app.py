@@ -1,6 +1,5 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
 import math
 
 st.set_page_config(page_title="📦 Pallet Layer Simulation with Freeform Leftover Mixing", layout="wide")
@@ -21,26 +20,39 @@ default_data = [
     {"Part No": "61386", "Length (cm)": 41, "Width (cm)": 35, "Height (cm)": 30, "Quantity": 52, "Box/Layer": 8, "Max Layer": 4},
     {"Part No": "61387", "Length (cm)": 41, "Width (cm)": 35, "Height (cm)": 30, "Quantity": 18, "Box/Layer": 8, "Max Layer": 4},
     {"Part No": "61388", "Length (cm)": 41, "Width (cm)": 35, "Height (cm)": 30, "Quantity": 52, "Box/Layer": 8, "Max Layer": 4},
+    {"Part No": "61400", "Length (cm)": 50, "Width (cm)": 30, "Height (cm)": 25, "Quantity": 40, "Box/Layer": 5, "Max Layer": 5},
+    {"Part No": "61401", "Length (cm)": 55, "Width (cm)": 32, "Height (cm)": 28, "Quantity": 35, "Box/Layer": 5, "Max Layer": 5},
+    {"Part No": "61402", "Length (cm)": 48, "Width (cm)": 34, "Height (cm)": 27, "Quantity": 36, "Box/Layer": 6, "Max Layer": 4},
+    {"Part No": "61403", "Length (cm)": 45, "Width (cm)": 30, "Height (cm)": 25, "Quantity": 24, "Box/Layer": 4, "Max Layer": 4},
 ]
 
+# Allow user to pick how many PNs to simulate (up to 10)
+max_pn_limit = 10
+pn_count = st.slider("Number of Part Numbers (PNs) to simulate", min_value=1, max_value=max_pn_limit, value=min(len(default_data), max_pn_limit))
+
+# Trim default data to selected PN count
+input_data = pd.DataFrame(default_data[:pn_count])
+
 box_df = st.data_editor(
-    pd.DataFrame(default_data),
+    input_data,
     num_rows="dynamic",
     use_container_width=True,
     key="box_input"
 )
 
+# Pallet settings
 pallet_length = st.number_input("Pallet Length (cm)", min_value=50.0, value=120.0)
 pallet_width = st.number_input("Pallet Width (cm)", min_value=50.0, value=100.0)
 pallet_base_height = 15.0
 pallet_max_total_height = st.number_input("Max Pallet Height Including Base (cm)", min_value=100.0, max_value=200.0, value=150.0)
 max_stack_height = pallet_max_total_height - pallet_base_height
 
+# --- Core Functions ---
 def explode_layers(df):
     layers = []
     for idx, row in df.iterrows():
         qty_left = row["Quantity"]
-        for layer_idx in range(math.ceil(row["Quantity"] / row["Box/Layer"])):
+        for _ in range(math.ceil(row["Quantity"] / row["Box/Layer"])):
             layer_boxes = min(row["Box/Layer"], qty_left)
             if layer_boxes < row["Box/Layer"] and qty_left > 0:
                 layer_boxes = row["Box/Layer"]
@@ -166,6 +178,7 @@ def create_consolidated_csv(pallets, pallet_L, pallet_W, pallet_base_H):
         })
     return pd.DataFrame(rows)
 
+# --- Simulation Trigger ---
 if st.button("Simulate and Consolidate"):
     if box_df.empty:
         st.error("Please enter box data")
