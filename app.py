@@ -176,3 +176,14 @@ if st.button("Simulate and Consolidate"):
         )
 
         st.dataframe(csv_df)
+
+        # Show each pallet's dimensions at the end
+        st.header("Pallet Dimensions Summary")
+        for i, p in enumerate(all_pallets):
+            if p["Box Length"] == "Mixed":
+                st.write(f'Pallet #{i+1}: [Mixed dimensions]')
+                st.write(f'  Layers: {p["Pallet Layers"]}, Max Layer: {p["Max Layer"]}, Height: {p["Pallet Height (cm)"]} cm')
+                st.write(f'  Layer Summary: {p.get("Layer Summary", "")}')
+            else:
+                st.write(f'Pallet #{i+1}: {pallet_length} x {pallet_width} x {p["Pallet Height (cm)"]} cm (LxWxH)')
+                st.write(f'  Box: {p["Box Length"]}x{p["Box Width"]}x{p["Box Height"]} cm, Layers: {p["Pallet Layers"]}, Max Layer: {p["Max Layer"]}, Height Utilization: {p["Height Utilization (%)"]}%')
