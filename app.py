@@ -1,238 +1,134 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import math
+from itertools import product
+import plotly.graph_objects as go
+import random
 
-st.set_page_config(page_title="📦 Pallet Layer Simulation (No Part No. Grouping)", layout="wide")
-st.title(":package: Pallet Layer Simulation - Group by Dimension Only, Free Mix Leftovers")
+# Pallet settings
+PALLET_LENGTH = 120  # cm
+PALLET_WIDTH = 100   # cm
+PALLET_HEIGHT_LIMIT = 135  # box-only height in cm
+PALLET_BASE_HEIGHT = 20  # cm pallet base
 
-st.markdown("""
-**Layer stacking rules:**  
-1. Group layers by box dimensions only (Box Length, Box Width, Box Height, Box/Layer, Max Layer).  
-   - Do **not** use Part No. in grouping.  
-   - Stack layers on a pallet up to the max allowed (by Max Layer and box height sum 135–140 cm).  
-   - PNs can be mixed in these full pallets if their box dimensions match.  
-2. Leftover layers are freely mixed (any PN, any dimension) up to the largest available Max Layer and total stacked box height 135–140 cm.
-3. Pallet base is 15 cm, so total pallet height is 150–155 cm.
-4. For "mixed" pallets, box columns show "Mixed" and a Layer Summary describes the contents.
-""")
+MAX_PARTS = 10
 
-st.header("Upload or Edit Raw Data")
-default_data = [
-    {"Part No": "51700", "Length (cm)": 60, "Width (cm)": 29, "Height (cm)": 29, "Quantity": 14, "Box/Layer": 6, "Max Layer": 4},
-    {"Part No": "52363", "Length (cm)": 54, "Width (cm)": 38, "Height (cm)": 31, "Quantity": 5, "Box/Layer": 5, "Max Layer": 4},
-    {"Part No": "61385", "Length (cm)": 51, "Width (cm)": 35, "Height (cm)": 30, "Quantity": 78, "Box/Layer": 6, "Max Layer": 4},
-    {"Part No": "61386", "Length (cm)": 41, "Width (cm)": 35, "Height (cm)": 30, "Quantity": 52, "Box/Layer": 8, "Max Layer": 4},
-    {"Part No": "61387", "Length (cm)": 41, "Width (cm)": 35, "Height (cm)": 30, "Quantity": 18, "Box/Layer": 8, "Max Layer": 4},
-    {"Part No": "61388", "Length (cm)": 41, "Width (cm)": 35, "Height (cm)": 30, "Quantity": 52, "Box/Layer": 8, "Max Layer": 4},
-]
+# Streamlit UI
+st.set_page_config(layout="wide")
+st.title("Multi-PN Palletizer with Height Optimization")
 
-box_df = st.data_editor(
-    pd.DataFrame(default_data),
-    num_rows="dynamic",
-    use_container_width=True,
-    key="box_input"
-)
+num_parts = st.number_input("How many Part Numbers to input (max 10)?", min_value=1, max_value=MAX_PARTS, value=3)
 
-pallet_length = st.number_input("Pallet Length (cm)", min_value=50.0, value=120.0)
-pallet_width = st.number_input("Pallet Width (cm)", min_value=50.0, value=100.0)
-pallet_base_height = 15
-min_stack_height = 135
-max_stack_height = 140
+part_data = []
 
-def explode_layers(df):
-    layers = []
-    for idx, row in df.iterrows():
-        qty_left = row["Quantity"]
-        for _ in range(math.ceil(row["Quantity"] / row["Box/Layer"])):
-            layer_boxes = min(row["Box/Layer"], qty_left)
-            layers.append({
-                "Part No": row["Part No"],
-                "Box Length": row["Length (cm)"],
-                "Box Width": row["Width (cm)"],
-                "Box Height": row["Height (cm)"],
-                "Box/Layer": row["Box/Layer"],
-                "Max Layer": row["Max Layer"],
-                "Boxes in Layer": layer_boxes,
-                "Layer Height": row["Height (cm)"],
-                "Layer Source": idx
+for i in range(num_parts):
+    st.subheader(f"Part {i+1}")
+    col1, col2, col3, col4, col5 = st.columns(5)
+    with col1:
+        pn = st.text_input(f"Part Number {i+1}", key=f"pn_{i}")
+    with col2:
+        length = st.number_input(f"Length (cm) {i+1}", min_value=1, key=f"l_{i}")
+    with col3:
+        width = st.number_input(f"Width (cm) {i+1}", min_value=1, key=f"w_{i}")
+    with col4:
+        height = st.number_input(f"Height (cm) {i+1}", min_value=1, key=f"h_{i}")
+    with col5:
+        quantity = st.number_input(f"Quantity {i+1}", min_value=1, key=f"q_{i}")
+
+    part_data.append({
+        'pn': pn,
+        'length': length,
+        'width': width,
+        'height': height,
+        'quantity': quantity
+    })
+
+if st.button("Run Palletizing Simulation"):
+    # Expand each part into individual boxes
+    boxes = []
+    for part in part_data:
+        for _ in range(int(part['quantity'])):
+            boxes.append({
+                'pn': part['pn'],
+                'length': part['length'],
+                'width': part['width'],
+                'height': part['height']
             })
-            qty_left -= layer_boxes
-    return layers
 
-def pack_full_pallets_by_dimensions(layers):
-    # Group by box dimensions (but NOT Part No)
+    # Sort by height descending
+    boxes = sorted(boxes, key=lambda x: (x['height'], x['length'], x['width']), reverse=True)
+
     pallets = []
-    unassigned_layers = []
-    df_layers = pd.DataFrame(layers)
-    if len(df_layers) == 0:
-        return [], []
+    current_pallet = []
+    current_height = 0
+    used_area = np.zeros((PALLET_LENGTH, PALLET_WIDTH))
 
-    group_cols = ["Box Length", "Box Width", "Box Height", "Box/Layer", "Max Layer"]
-    # Group layers by dimension set
-    for key, group in df_layers.groupby(group_cols):
-        group = group.copy().reset_index(drop=True)
-        # For each group, sort by Part No (for reporting only)
-        group = group.sort_values("Part No").reset_index(drop=True)
-        n_layers = len(group)
-        used = np.zeros(n_layers, dtype=bool)
-        idx = 0
-        while idx < n_layers:
-            stack = []
-            stack_height = 0
-            max_layer = key[4]
-            # Stack up to max_layer and not over height
-            j = idx
-            while j < n_layers and len(stack) < max_layer:
-                h = group.loc[j, "Layer Height"]
-                if used[j]:
-                    j += 1
-                    continue
-                if stack_height + h > max_stack_height:
-                    break
-                stack.append(group.loc[j])
-                stack_height += h
-                used[j] = True
-                j += 1
-            # If nothing added, forcibly add one for progress
-            if not stack and idx < n_layers and not used[idx]:
-                stack.append(group.loc[idx])
-                stack_height += group.loc[idx, "Layer Height"]
-                used[idx] = True
-            if stack:
-                # Report unique PNs for this stack
-                part_nos = sorted(set(l["Part No"] for l in stack))
-                util = stack_height / (max_layer * key[2]) * 100 if max_layer > 0 else 0
-                pallets.append({
-                    "Pallet Group": "Full (No Mix of Dimensions)",
-                    "Part Nos": part_nos,
-                    "Box Length": key[0],
-                    "Box Width": key[1],
-                    "Box Height": key[2],
-                    "Box/Layer": key[3],
-                    "Max Layer": max_layer,
-                    "Pallet Layers": len(stack),
-                    "Total Boxes": sum(l["Boxes in Layer"] for l in stack),
-                    "Pallet Height (cm)": stack_height,
-                    "Height Utilization (%)": round(util, 1),
-                    "Layer Details": [dict(l) for l in stack]
-                })
-            # Move to next unused layer
-            idx += 1
-            while idx < n_layers and used[idx]:
-                idx += 1
-        # Any unused layers (shouldn't happen, but for safety)
-        for i in range(n_layers):
-            if not used[i]:
-                unassigned_layers.append(group.loc[i])
-    return pallets, unassigned_layers
+    def can_place(layer, l, w):
+        if l > PALLET_LENGTH or w > PALLET_WIDTH:
+            return False
+        return True
 
-def pack_leftover_layers_any_mix(unassigned_layers):
-    # Mix loading for remaining layers - allow any combination, fill up to height/max_layer
-    pallets = []
-    if not unassigned_layers:
-        return pallets
-    df_layers = pd.DataFrame(unassigned_layers)
-    available_layers = df_layers.copy().reset_index(drop=True)
-    n_layers = len(available_layers)
-    used = np.zeros(n_layers, dtype=bool)
-    idx = 0
-    while idx < n_layers:
-        stack = []
-        stack_height = 0
-        # Use the largest max_layer among the available leftover layers for this pallet
-        not_used_idxs = [i for i in range(n_layers) if not used[i]]
-        if not not_used_idxs:
-            break
-        max_layer = available_layers.loc[not_used_idxs, "Max Layer"].max()
-        # Stack as many as possible up to max_layer and height
-        for j in not_used_idxs:
-            h = available_layers.loc[j, "Layer Height"]
-            if len(stack) >= max_layer:
+    def place_layer(pallet, layer):
+        pallet.append(layer)
+
+    while boxes:
+        current_pallet = []
+        current_height = 0
+        remaining_boxes = boxes.copy()
+
+        while remaining_boxes:
+            box = remaining_boxes[0]
+            b_l, b_w, b_h = box['length'], box['width'], box['height']
+            fits = can_place(current_pallet, b_l, b_w)
+
+            if current_height + b_h <= PALLET_HEIGHT_LIMIT:
+                current_pallet.append(box)
+                current_height += b_h
+                boxes.remove(box)
+            else:
                 break
-            if stack_height + h > max_stack_height:
-                continue
-            stack.append(available_layers.loc[j])
-            stack_height += h
-            used[j] = True
-        # If nothing added, forcibly add one for progress
-        if not stack:
-            j = not_used_idxs[0]
-            stack.append(available_layers.loc[j])
-            stack_height += available_layers.loc[j, "Layer Height"]
-            used[j] = True
-        if stack:
-            all_pns = sorted(set(l["Part No"] for l in stack))
-            dim_str = "; ".join(
-                f'{l["Part No"]}:{l["Box Length"]}x{l["Box Width"]}x{l["Box Height"]}'
-                for l in stack
-            )
-            pallets.append({
-                "Pallet Group": "Consolidated (Free Mix)",
-                "Part Nos": all_pns,
-                "Box Length": "Mixed",
-                "Box Width": "Mixed",
-                "Box Height": "Mixed",
-                "Box/Layer": "Mixed",
-                "Max Layer": max_layer,
-                "Pallet Layers": len(stack),
-                "Total Boxes": sum(l["Boxes in Layer"] for l in stack),
-                "Pallet Height (cm)": stack_height,
-                "Height Utilization (%)": "",
-                "Layer Details": [dict(l) for l in stack],
-                "Layer Summary": dim_str
-            })
-        # Move idx to next unused
-        idx += 1
-        while idx < n_layers and used[idx]:
-            idx += 1
-    return pallets
 
-def create_consolidated_csv(pallets, pallet_L, pallet_W, pallet_base_height):
-    rows = []
-    for i, p in enumerate(pallets):
-        total_height = pallet_base_height + p["Pallet Height (cm)"]
-        rows.append({
-            "Pallet No": i+1,
-            "Pallet Group": p["Pallet Group"],
-            "Part Nos": ", ".join(map(str, p["Part Nos"])),
-            "Box Length (cm)": p["Box Length"],
-            "Box Width (cm)": p["Box Width"],
-            "Box Height (cm)": p["Box Height"],
-            "Pallet Length (cm)": pallet_L,
-            "Pallet Width (cm)": pallet_W,
-            "Box/Layer": p["Box/Layer"],
-            "Max Layer": p["Max Layer"],
-            "Pallet Layers": p["Pallet Layers"],
-            "Total Boxes": p["Total Boxes"],
-            "Stacked Height (cm)": p["Pallet Height (cm)"],
-            "Total Pallet Height (cm)": total_height,
-            "Height Utilization (%)": p["Height Utilization (%)"],
-            "Layer Summary": p.get("Layer Summary", "")
-        })
-    return pd.DataFrame(rows)
+        pallets.append(current_pallet)
 
-if st.button("Simulate and Consolidate"):
-    if box_df.empty:
-        st.error("Please enter box data")
-    else:
-        layers = explode_layers(box_df)
-        full_pallets, unassigned_layers = pack_full_pallets_by_dimensions(layers)
-        mixed_pallets = pack_leftover_layers_any_mix(unassigned_layers)
-        all_pallets = full_pallets + mixed_pallets
-        csv_df = create_consolidated_csv(all_pallets, pallet_length, pallet_width, pallet_base_height)
-        st.success(f"Total simulated pallets: {len(csv_df)} (including consolidated)")
+    st.success(f"Total pallets needed: {len(pallets)}")
 
-        st.download_button(
-            label="⬇️ Download Pallet Plan CSV",
-            data=csv_df.to_csv(index=False).encode("utf-8"),
-            file_name="pallet_simulation_consolidated.csv",
-            mime="text/csv"
-        )
+    # Visualize with Plotly 3D
+    fig = go.Figure()
+    colors = {}
+    color_list = ["red", "green", "blue", "orange", "purple", "cyan", "yellow", "pink", "lime", "gray"]
 
-        st.dataframe(csv_df)
+    for p_idx, pallet in enumerate(pallets):
+        z_offset = PALLET_BASE_HEIGHT
+        x_offset = 0
+        y_offset = 0
+        layer_height = 0
+        st.write(f"Pallet {p_idx+1}: {len(pallet)} boxes")
 
-        st.header("Pallet Dimensions Summary")
-        for i, p in enumerate(all_pallets):
-            total_height = pallet_base_height + p["Pallet Height (cm)"]
-            st.write(f'Pallet #{i+1}: {pallet_length} x {pallet_width} x {total_height} cm (LxWxH)')
+        for box in pallet:
+            pn = box['pn']
+            if pn not in colors:
+                colors[pn] = color_list[len(colors) % len(color_list)]
+
+            fig.add_trace(go.Mesh3d(
+                x=[x_offset, x_offset + box['length'], x_offset + box['length'], x_offset, x_offset, x_offset + box['length'], x_offset + box['length'], x_offset],
+                y=[y_offset, y_offset, y_offset + box['width'], y_offset + box['width'], y_offset, y_offset, y_offset + box['width'], y_offset + box['width']],
+                z=[z_offset, z_offset, z_offset, z_offset, z_offset + box['height'], z_offset + box['height'], z_offset + box['height'], z_offset + box['height']],
+                color=colors[pn],
+                opacity=0.7,
+                alphahull=0
+            ))
+            z_offset += box['height']  # Stack upward
+
+    fig.update_layout(
+        scene=dict(
+            xaxis_title='Length (cm)',
+            yaxis_title='Width (cm)',
+            zaxis_title='Height (cm)'
+        ),
+        width=900,
+        height=700,
+        title="3D Pallet Simulation"
+    )
+    st.plotly_chart(fig)
+
+    st.info(f"Each pallet base height: {PALLET_BASE_HEIGHT} cm. Box stacking limit: {PALLET_HEIGHT_LIMIT} cm.")
