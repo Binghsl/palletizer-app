@@ -3,15 +3,15 @@ import pandas as pd
 import numpy as np
 import math
 
-st.set_page_config(page_title="📦 Pallet Layer Simulation (PN Priority, No Dim Mixing)", layout="wide")
-st.title(":package: Pallet Layer Simulation - Prioritize Same PN, No Box Dim Mixing")
+st.set_page_config(page_title="📦 Pallet Layer Simulation (PN Priority, Max Height Utilization)", layout="wide")
+st.title(":package: Pallet Layer Simulation - Prioritize Same PN, Maximize Full Pallet Height")
 
 st.markdown("""
 **Layer stacking rules:**  
 1. **Full pallets:**  
    - First, stack by Part No **and** box dimensions (Box Length, Box Width, Box Height, Box/Layer, Max Layer).  
-   - Stack layers on a pallet up to the max allowed by Max Layer and box height sum 135–140 cm.  
-   - If leftover layers of the same box dimension exist from different PNs, fill additional full pallets by dimension only (PNs can be mixed, but never mix box dimensions).  
+   - For each group, fill each pallet up to the first limit reached: either Max Layer or 135–140 cm stacked height.  
+   - If leftover layers of the same box dimension exist from different PNs, continue making full pallets by dimension only (PNs can be mixed, but never mix box dimensions).  
 2. **Leftover layers:**  
    - Any leftovers are freely mixed (any PN, any dimension) up to the largest available Max Layer and total stacked box height 135–140 cm.
 3. **Pallet base is 15 cm**, so total pallet height is 150–155 cm.
@@ -61,75 +61,75 @@ def explode_layers(df):
             qty_left -= layer_boxes
     return layers
 
-def stack_layers_by_group(df_layers, group_cols, max_stack_height):
+def stack_layers_max_utilization(group, max_stack_height):
+    """Stack as many layers as possible on each pallet, up to Max Layer and height limit."""
+    group = group.copy().reset_index(drop=True)
+    n_layers = len(group)
+    used = np.zeros(n_layers, dtype=bool)
     pallets = []
-    unassigned_layers = []
-    for key, group in df_layers.groupby(group_cols):
-        group = group.copy().reset_index(drop=True)
-        n_layers = len(group)
-        used = np.zeros(n_layers, dtype=bool)
-        idx = 0
-        while idx < n_layers:
-            stack = []
-            stack_height = 0
-            max_layer = group.loc[0, "Max Layer"]
-            j = idx
-            while j < n_layers and len(stack) < max_layer:
-                h = group.loc[j, "Layer Height"]
-                if used[j]:
-                    j += 1
-                    continue
-                if stack_height + h > max_stack_height:
-                    break
-                stack.append(group.loc[j])
-                stack_height += h
-                used[j] = True
-                j += 1
-            if not stack and idx < n_layers and not used[idx]:
-                stack.append(group.loc[idx])
-                stack_height += group.loc[idx, "Layer Height"]
-                used[idx] = True
-            if stack:
-                # For single-PN, report single; for mixed, report all PNs
-                part_nos = sorted(set(l["Part No"] for l in stack))
-                util = stack_height / (max_layer * group.loc[0, "Box Height"]) * 100 if max_layer > 0 else 0
-                pallets.append({
-                    "Pallet Group": "Full (No Mix of Dimensions)" if len(part_nos) == 1 else "Full (Mixed PN, No Dim Mix)",
-                    "Part Nos": part_nos,
-                    "Box Length": group.loc[0, "Box Length"],
-                    "Box Width": group.loc[0, "Box Width"],
-                    "Box Height": group.loc[0, "Box Height"],
-                    "Box/Layer": group.loc[0, "Box/Layer"],
-                    "Max Layer": max_layer,
-                    "Pallet Layers": len(stack),
-                    "Total Boxes": sum(l["Boxes in Layer"] for l in stack),
-                    "Pallet Height (cm)": stack_height,
-                    "Height Utilization (%)": round(util, 1),
-                    "Layer Details": [dict(l) for l in stack]
-                })
-            idx += 1
-            while idx < n_layers and used[idx]:
-                idx += 1
-        # Any unused layers (shouldn't happen, but for safety)
+    while not all(used):
+        stack = []
+        stack_height = 0
+        max_layer = group.loc[0, "Max Layer"]
         for i in range(n_layers):
-            if not used[i]:
-                unassigned_layers.append(group.loc[i])
-    return pallets, unassigned_layers
+            if used[i]:
+                continue
+            h = group.loc[i, "Layer Height"]
+            if len(stack) < max_layer and (stack_height + h) <= max_stack_height:
+                stack.append(group.loc[i])
+                stack_height += h
+                used[i] = True
+            if len(stack) == max_layer or stack_height == max_stack_height:
+                break
+        if stack:
+            part_nos = sorted(set(l["Part No"] for l in stack))
+            util = stack_height / (max_layer * group.loc[0, "Box Height"]) * 100 if max_layer > 0 else 0
+            pallets.append({
+                "Pallet Group": "Full (No Mix of Dimensions)" if len(part_nos) == 1 else "Full (Mixed PN, No Dim Mix)",
+                "Part Nos": part_nos,
+                "Box Length": group.loc[0, "Box Length"],
+                "Box Width": group.loc[0, "Box Width"],
+                "Box Height": group.loc[0, "Box Height"],
+                "Box/Layer": group.loc[0, "Box/Layer"],
+                "Max Layer": max_layer,
+                "Pallet Layers": len(stack),
+                "Total Boxes": sum(l["Boxes in Layer"] for l in stack),
+                "Pallet Height (cm)": stack_height,
+                "Height Utilization (%)": round(util, 1),
+                "Layer Details": [dict(l) for l in stack]
+            })
+    return pallets
 
 def priority_full_pallets(layers):
     df_layers = pd.DataFrame(layers)
     # 1. Priority: stack by (Box Length, Box Width, Box Height, Box/Layer, Max Layer, Part No) -> single-PN full pallets
-    pallets_1, leftovers_1 = stack_layers_by_group(
-        df_layers, ["Box Length", "Box Width", "Box Height", "Box/Layer", "Max Layer", "Part No"], max_stack_height
-    )
+    pallets_1 = []
+    leftovers_1 = []
+    for key, group in df_layers.groupby(["Box Length", "Box Width", "Box Height", "Box/Layer", "Max Layer", "Part No"]):
+        group_pallets = stack_layers_max_utilization(group, max_stack_height)
+        pallets_1.extend(group_pallets)
+    # Mark all used layers
+    used_indices = set()
+    for p in pallets_1:
+        for l in p["Layer Details"]:
+            used_indices.add(l["Layer Source"])
+    # Find all layers not yet used (by group index)
+    mask = ~df_layers.index.isin(list(used_indices))
+    leftovers_df1 = df_layers[mask]
     # 2. Next: stack by (Box Length, Box Width, Box Height, Box/Layer, Max Layer) for those leftovers (mixed PN, but dimensions match)
-    if leftovers_1:
-        leftovers_df2 = pd.DataFrame(leftovers_1)
-        pallets_2, leftovers_2 = stack_layers_by_group(
-            leftovers_df2, ["Box Length", "Box Width", "Box Height", "Box/Layer", "Max Layer"], max_stack_height
-        )
-    else:
-        pallets_2, leftovers_2 = [], []
+    pallets_2 = []
+    if not leftovers_df1.empty:
+        # Group by dimension only
+        for key, group in leftovers_df1.groupby(["Box Length", "Box Width", "Box Height", "Box/Layer", "Max Layer"]):
+            group_pallets = stack_layers_max_utilization(group, max_stack_height)
+            pallets_2.extend(group_pallets)
+    # Mark all used layers now
+    used_indices_2 = set()
+    for p in pallets_2:
+        for l in p["Layer Details"]:
+            used_indices_2.add(l["Layer Source"])
+    mask2 = ~leftovers_df1.index.isin(list(used_indices_2))
+    leftovers_2 = leftovers_df1[mask2].to_dict("records") if not leftovers_df1.empty else []
     return pallets_1 + pallets_2, leftovers_2
 
 def pack_leftover_layers_any_mix(unassigned_layers):
