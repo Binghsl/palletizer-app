@@ -34,7 +34,6 @@ pallet_length = st.number_input("Pallet Length (cm)", min_value=50.0, value=120.
 pallet_width = st.number_input("Pallet Width (cm)", min_value=50.0, value=100.0)
 
 def explode_layers(df):
-    # For all rows, break out the required number of layers, using "full layer" if not enough quantity
     layers = []
     for idx, row in df.iterrows():
         qty_left = row["Quantity"]
@@ -57,14 +56,12 @@ def explode_layers(df):
     return layers
 
 def pack_layers_by_pn_and_dimension(layers):
-    # Step 1: Full pallets by PN and layer dimension (no mixing if same dimension)
     pallets = []
     unassigned_layers = []
     df_layers = pd.DataFrame(layers)
     if len(df_layers) == 0:
         return [], []
 
-    # Full pallets by PN and layer dimension
     group_cols = ["Box Length", "Box Width", "Box Height", "Box/Layer", "Max Layer", "Part No"]
     for key, group in df_layers.groupby(group_cols):
         group = group.copy()
@@ -88,7 +85,6 @@ def pack_layers_by_pn_and_dimension(layers):
                 "Height Utilization (%)": round(util, 1),
                 "Layer Details": these_layers.to_dict("records")
             })
-        # Remainder goes to unassigned
         remain = len(group) % max_layer
         if remain > 0:
             remain_layers = group.iloc[-remain:]
@@ -98,21 +94,20 @@ def pack_layers_by_pn_and_dimension(layers):
     return pallets, unassigned_layers
 
 def pack_leftover_layers_any_mix(unassigned_layers):
-    # Step 2: Mix loading for remaining layers - allow any combination, fill up to the largest max_layer among leftovers
     pallets = []
     if len(unassigned_layers) == 0:
         return pallets
     df_layers = pd.DataFrame(unassigned_layers)
-    # For simplicity, use the largest max_layer among leftovers for mixing
     leftover_layers = df_layers.copy()
     while not leftover_layers.empty:
-        # Find the max_layer for the next batch (could also pick min or median if desired)
         max_layer = leftover_layers["Max Layer"].max()
         batch = leftover_layers.iloc[:max_layer]
         pallet_height = batch["Layer Height"].sum()
-        # For reporting, use a comma-joined description of dimensions/PNS
         all_pns = sorted(batch["Part No"].unique())
-        dim_str = "; ".join(f'{r["Part No"]}:{r["Box Length"]}x{r["Box Width"]}x{r["Box Height"]}' for _, r in batch.iterrows())
+        dim_str = "; ".join(
+            f'{r["Part No"]}:{r["Box Length"]}x{r["Box Width"]}x{r["Box Height"]}'
+            for _, r in batch.iterrows()
+        )
         pallets.append({
             "Pallet Group": "Consolidated (Free Mix)",
             "Part Nos": all_pns,
@@ -124,7 +119,7 @@ def pack_leftover_layers_any_mix(unassigned_layers):
             "Pallet Layers": len(batch),
             "Total Boxes": batch["Boxes in Layer"].sum(),
             "Pallet Height (cm)": pallet_height,
-            "Height Utilization (%)": "",  # not meaningful when mixed
+            "Height Utilization (%)": "",
             "Layer Details": batch.to_dict("records"),
             "Layer Summary": dim_str
         })
@@ -157,14 +152,10 @@ if st.button("Simulate and Consolidate"):
     if box_df.empty:
         st.error("Please enter box data")
     else:
-        # 1. Break out all layers
         layers = explode_layers(box_df)
-        # 2. Full pallets by PN and dimension (no mixing)
         full_pallets, unassigned_layers = pack_layers_by_pn_and_dimension(layers)
-        # 3. Remaining layers: allow ANY mix (even across dimension)
         mixed_pallets = pack_leftover_layers_any_mix(unassigned_layers)
         all_pallets = full_pallets + mixed_pallets
-        # 4. Create CSV
         csv_df = create_consolidated_csv(all_pallets, pallet_length, pallet_width)
         st.success(f"Total simulated pallets: {len(csv_df)} (including consolidated)")
 
@@ -177,13 +168,10 @@ if st.button("Simulate and Consolidate"):
 
         st.dataframe(csv_df)
 
-        # Show each pallet's dimensions at the end
+        # Show only each pallet's dimensions at the end
         st.header("Pallet Dimensions Summary")
         for i, p in enumerate(all_pallets):
             if p["Box Length"] == "Mixed":
-                st.write(f'Pallet #{i+1}: [Mixed dimensions]')
-                st.write(f'  Layers: {p["Pallet Layers"]}, Max Layer: {p["Max Layer"]}, Height: {p["Pallet Height (cm)"]} cm')
-                st.write(f'  Layer Summary: {p.get("Layer Summary", "")}')
+                st.write(f'Pallet #{i+1}: [Mixed dimensions] {pallet_length} x {pallet_width} x {p["Pallet Height (cm)"]} cm (LxWxH)')
             else:
                 st.write(f'Pallet #{i+1}: {pallet_length} x {pallet_width} x {p["Pallet Height (cm)"]} cm (LxWxH)')
-                st.write(f'  Box: {p["Box Length"]}x{p["Box Width"]}x{p["Box Height"]} cm, Layers: {p["Pallet Layers"]}, Max Layer: {p["Max Layer"]}, Height Utilization: {p["Height Utilization (%)"]}%')
