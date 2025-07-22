@@ -32,9 +32,11 @@ box_df = st.data_editor(
 
 pallet_length = st.number_input("Pallet Length (cm)", min_value=50.0, value=120.0)
 pallet_width = st.number_input("Pallet Width (cm)", min_value=50.0, value=100.0)
+pallet_base_height = 15.0
+pallet_max_total_height = st.number_input("Max Pallet Height Including Base (cm)", min_value=100.0, max_value=200.0, value=150.0)
+max_stack_height = pallet_max_total_height - pallet_base_height
 
 def explode_layers(df):
-    # For all rows, break out the required number of layers, using "full layer" if not enough quantity
     layers = []
     for idx, row in df.iterrows():
         qty_left = row["Quantity"]
@@ -57,23 +59,26 @@ def explode_layers(df):
     return layers
 
 def pack_layers_by_pn_and_dimension(layers):
-    # Step 1: Full pallets by PN and layer dimension (no mixing if same dimension)
     pallets = []
     unassigned_layers = []
     df_layers = pd.DataFrame(layers)
     if len(df_layers) == 0:
         return [], []
 
-    # Full pallets by PN and layer dimension
     group_cols = ["Box Length", "Box Width", "Box Height", "Box/Layer", "Max Layer", "Part No"]
     for key, group in df_layers.groupby(group_cols):
         group = group.copy()
+        box_height = key[2]
         max_layer = key[4]
-        num_full_pallets = len(group) // max_layer
+        stacking_height = max_layer * box_height
+        if stacking_height > max_stack_height:
+            max_layer = math.floor(max_stack_height / box_height)
+        num_full_pallets = len(group) // max_layer if max_layer > 0 else 0
+
         for i in range(num_full_pallets):
             these_layers = group.iloc[i*max_layer:(i+1)*max_layer]
             pallet_height = these_layers["Layer Height"].sum()
-            util = pallet_height / (max_layer * key[2]) * 100 if max_layer > 0 else 0
+            util = pallet_height / (max_layer * box_height) * 100 if max_layer > 0 else 0
             pallets.append({
                 "Pallet Group": "Full (No Mix)",
                 "Part Nos": [these_layers["Part No"].iloc[0]],
@@ -88,8 +93,8 @@ def pack_layers_by_pn_and_dimension(layers):
                 "Height Utilization (%)": round(util, 1),
                 "Layer Details": these_layers.to_dict("records")
             })
-        # Remainder goes to unassigned
-        remain = len(group) % max_layer
+
+        remain = len(group) % max_layer if max_layer > 0 else len(group)
         if remain > 0:
             remain_layers = group.iloc[-remain:]
             for _, lrow in remain_layers.iterrows():
@@ -98,19 +103,25 @@ def pack_layers_by_pn_and_dimension(layers):
     return pallets, unassigned_layers
 
 def pack_leftover_layers_any_mix(unassigned_layers):
-    # Step 2: Mix loading for remaining layers - allow any combination, fill up to the largest max_layer among leftovers
     pallets = []
     if len(unassigned_layers) == 0:
         return pallets
     df_layers = pd.DataFrame(unassigned_layers)
-    # For simplicity, use the largest max_layer among leftovers for mixing
     leftover_layers = df_layers.copy()
     while not leftover_layers.empty:
-        # Find the max_layer for the next batch (could also pick min or median if desired)
-        max_layer = leftover_layers["Max Layer"].max()
-        batch = leftover_layers.iloc[:max_layer]
+        batch_layers = []
+        cumulative_height = 0
+        for idx, row in leftover_layers.iterrows():
+            if len(batch_layers) >= row["Max Layer"]:
+                continue
+            if cumulative_height + row["Layer Height"] > max_stack_height:
+                break
+            batch_layers.append(row)
+            cumulative_height += row["Layer Height"]
+        if not batch_layers:
+            break
+        batch = pd.DataFrame(batch_layers)
         pallet_height = batch["Layer Height"].sum()
-        # For reporting, use a comma-joined description of dimensions/PNS
         all_pns = sorted(batch["Part No"].unique())
         dim_str = "; ".join(f'{r["Part No"]}:{r["Box Length"]}x{r["Box Width"]}x{r["Box Height"]}' for _, r in batch.iterrows())
         pallets.append({
@@ -120,20 +131,21 @@ def pack_leftover_layers_any_mix(unassigned_layers):
             "Box Width": "Mixed",
             "Box Height": "Mixed",
             "Box/Layer": "Mixed",
-            "Max Layer": max_layer,
+            "Max Layer": batch["Max Layer"].max(),
             "Pallet Layers": len(batch),
             "Total Boxes": batch["Boxes in Layer"].sum(),
             "Pallet Height (cm)": pallet_height,
-            "Height Utilization (%)": "",  # not meaningful when mixed
+            "Height Utilization (%)": "",
             "Layer Details": batch.to_dict("records"),
             "Layer Summary": dim_str
         })
         leftover_layers = leftover_layers.iloc[len(batch):]
     return pallets
 
-def create_consolidated_csv(pallets, pallet_L, pallet_W):
+def create_consolidated_csv(pallets, pallet_L, pallet_W, pallet_base_H):
     rows = []
     for i, p in enumerate(pallets):
+        total_height = p["Pallet Height (cm)"] + pallet_base_H
         rows.append({
             "Pallet No": i+1,
             "Pallet Group": p["Pallet Group"],
@@ -143,13 +155,14 @@ def create_consolidated_csv(pallets, pallet_L, pallet_W):
             "Box Height (cm)": p["Box Height"],
             "Pallet Length (cm)": pallet_L,
             "Pallet Width (cm)": pallet_W,
+            "Pallet Height (cm)": round(total_height, 1),
             "Box/Layer": p["Box/Layer"],
             "Max Layer": p["Max Layer"],
             "Pallet Layers": p["Pallet Layers"],
             "Total Boxes": p["Total Boxes"],
-            "Pallet Height (cm)": p["Pallet Height (cm)"],
             "Height Utilization (%)": p["Height Utilization (%)"],
-            "Layer Summary": p.get("Layer Summary", "")
+            "Layer Summary": p.get("Layer Summary", ""),
+            "Pallet Dimension (cm)": f"{int(pallet_L)}x{int(pallet_W)}x{round(total_height)}"
         })
     return pd.DataFrame(rows)
 
@@ -157,15 +170,11 @@ if st.button("Simulate and Consolidate"):
     if box_df.empty:
         st.error("Please enter box data")
     else:
-        # 1. Break out all layers
         layers = explode_layers(box_df)
-        # 2. Full pallets by PN and dimension (no mixing)
         full_pallets, unassigned_layers = pack_layers_by_pn_and_dimension(layers)
-        # 3. Remaining layers: allow ANY mix (even across dimension)
         mixed_pallets = pack_leftover_layers_any_mix(unassigned_layers)
         all_pallets = full_pallets + mixed_pallets
-        # 4. Create CSV
-        csv_df = create_consolidated_csv(all_pallets, pallet_length, pallet_width)
+        csv_df = create_consolidated_csv(all_pallets, pallet_length, pallet_width, pallet_base_height)
         st.success(f"Total simulated pallets: {len(csv_df)} (including consolidated)")
 
         st.download_button(
